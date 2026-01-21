@@ -1,0 +1,1 @@
+from .demuxHMM import HMMModel
