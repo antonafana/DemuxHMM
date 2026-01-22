@@ -529,7 +529,7 @@ def get_double_indicator(args):
 class HMMModel:
     def __init__(self, A, D, num_clusters, expected_transitions=None,
                  z_init=None, threads=80, T_init=None, theta_init=None, pi_init=None,
-                 do_theta_update=False, do_pi_update=True):
+                 do_theta_update=False, do_pi_update=True, use_gpu=True):
         """
 
         Args:
@@ -553,6 +553,7 @@ class HMMModel:
         self.do_theta_update = do_theta_update
         self.do_pi_update = do_pi_update
         self.model_prob = None
+        self.use_gpu = use_gpu
 
         # Set hyperparameters for theta based on VireoSNP paper and then initialize theta
         self.alphas = np.array([0.3, 3, 29.7])
@@ -661,12 +662,12 @@ class HMMModel:
             self.update_pi()
 
 
-    def get_z_probs(self, use_gpu=True):
+    def get_z_probs(self):
         """
         Computes z_probs using CPU or GPU.
         """
         start_time = time.time()
-        if use_gpu:
+        if self.use_gpu:
             self.z_probs = get_z_probs_gpu(
                 self.num_cells, self.num_clusters, self.num_chr,
                 self.chain_lengths, self.A, self.D, self.V,
@@ -693,7 +694,7 @@ class HMMModel:
             self.z_probs[i] = self.z_probs[i] / np.sum(self.z_probs[i])  # re-normalize
 
         end_time = time.time()
-        print(f"get_z_probs completed in {end_time - start_time:.4f} seconds (GPU: {use_gpu})")
+        print(f"get_z_probs completed in {end_time - start_time:.4f} seconds (GPU: {self.use_gpu})")
 
     def set_z(self):
         """
@@ -702,8 +703,8 @@ class HMMModel:
         """
         self.Z = np.argmax(self.z_probs, axis=1)
 
-    def forward_backward_pass(self, use_gpu=True):
-        if use_gpu:
+    def forward_backward_pass(self):
+        if self.use_gpu:
             try:
                 log_likelihoods = precompute_cluster_log_likelihoods(
                     self.A, self.D, self.Z, self.thetas,
@@ -770,7 +771,7 @@ class HMMModel:
 
         return la_pad, lb_pad, max_len
 
-    def get_chain_probabilities(self, use_gpu=True):
+    def get_chain_probabilities(self):
         """
         Uses computed alphas and betas for V to get the probability of each possible
         state in each chain position. GPU-first with CPU fallback.
@@ -782,7 +783,7 @@ class HMMModel:
             probs_V_c = np.zeros(shape=(self.num_clusters, chain_length, 3), dtype=np.float32)
             probs_V.append(probs_V_c)
 
-        if use_gpu:
+        if self.use_gpu:
             try:
                 # Pack lists -> padded tensors for GPU
                 la_pad, lb_pad, max_len = self._pack_logs_to_padded()

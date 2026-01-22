@@ -12,9 +12,10 @@ parser = argparse.ArgumentParser(description="Run HMM on mouse sci-RNA-seq data"
 ADATA_PATH = 'data_dir/cellSNP_full_unfiltered.h5ad'
 METADATA_PATH = 'data_dir/jy-c.seqaggr.eagle.10.sm.best'
 ALLOWED_CHR = [f'{i}' for i in range(1, 23)] + ['X']
-THREADS = 50
+THREADS = 40 
 TOL = 100
 NUM_REPEATS = 30
+USE_GPU = True
 
 # Load data
 adata = anndata.read_h5ad(ADATA_PATH)
@@ -71,7 +72,7 @@ start_time = datetime.now()
 for _ in range(NUM_REPEATS):
     # ─── Run HMM ──────────────────────────────────────────────────────────────────
     model = HMMModel(A, D, NUM_ORGANISMS, None, threads=THREADS,
-                     T_init=T_init, theta_init=theta_init, pi_init=pi_init, do_pi_update=False)
+                     T_init=T_init, theta_init=theta_init, pi_init=pi_init, do_pi_update=False, use_gpu=USE_GPU)
     model.solve(TOL, num_inits=0)
     model_out = model.get_output()
     assignments_new = np.argmax(model_out['z_probs'], axis=1)
