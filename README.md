@@ -40,6 +40,7 @@ tolerance = 1
 num_individuals = 100 
 mean_transitions = 10
 best_model_score = -np.inf
+best_model = None
 
 for _ in range(num_repeats):
     model = HMMModel(A, D, num_individuals, mean_transitions)
