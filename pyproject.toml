@@ -23,6 +23,7 @@ paper = [
     "pysam",
     "anndata",
     "vireoSNP",
+    "pandarallel"
 ]
 
 [tool.setuptools]
