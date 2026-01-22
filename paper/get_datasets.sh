@@ -5,3 +5,6 @@ wget -P data_dir/ https://cloud.flycellatlas.org/index.php/s/RAGbG59qwaLKqEF/dow
 # Unzip the provided mappings of genes between references and the SNPs between strains
 # Also contains the processed gene to SNP maps for those who wish to skip the pre-processing step
 unzip data_dir/snp_and_gene_maps.zip -d data_dir
+
+# Download demuxlet results from their paper repo
+wget -P data_dir/ https://raw.githubusercontent.com/yelabucsf/demuxlet_paper_code/refs/heads/master/fig2/jy-c.seqaggr.eagle.10.sm.best
