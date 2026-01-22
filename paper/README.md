@@ -18,6 +18,14 @@ python fly_variant_to_gene_mapping_fly_atlas.py
 ```
 ## Benchmarking and Simulation
 
+### Simulating and Evaluating Datasets
+Simulation of datasets and evaluation, including by competing methods, happens through the entrypoint `simulate_fly_breeding.py`.
+This script has a lot of parameters to play with, so we recommend looking at the bash scripts we use to generate the
+figures. We detail these below. If you want to run souporcell or scSplit, you'll need to download these and pass
+the path to their binaries when you run the script. For scSplit, we recommend using my [fork](https://github.com/antonafana/scSplit)
+, which is more up to date package-wise and more numerically stable.
+
+
 ### PBMC Dataset
 Running the pre-processing should have downloaded demuxlet's results from their paper, as well as an anndata of our
 cellSNP-lite variant calls (`--minMAF 0.1 --minCOUNT 20`). The benchmark can be run with:
