@@ -24,7 +24,8 @@ paper = [
     "anndata",
     "vireoSNP",
     "pandarallel",
-    "pyvcf3"
+    "pyvcf3",
+    "seaborn"
 ]
 
 [tool.setuptools]

@@ -36,6 +36,35 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cd souporcell/souporcell && cargo build --release
 ```
 
+### Figures 4 and 5
+These figures are a methods comparison sweep over a number of datasets. We pre-generate the datasets and then run the 
+methods on each one. Note, this takes a while... You may have to adjust parameters to fit your system specs, or may
+wish to run some of the parameter sweeps concurrently.
+
+```console
+mkdir figures
+sh generate_datasets.sh
+sh run_comparison_sweep.sh
+python comparison_fig.py
+```
+### Figure B.1
+This is a parameter sweep of DemuxHMM method on a grid of parameters. To run:
+
+```console
+sh grid_sweep.sh
+python grid_fig.py
+```
+
+### Figure B.2
+This is a performance test where we fix all parameters but the number of breeding generations and evaluate performance.
+To run:
+
+```console
+sh generate_datasets_generations.sh
+sh generations_sweep.sh
+python ari_v_generations_fig.py
+```
+
 ### PBMC Dataset
 Running the pre-processing should have downloaded demuxlet's results from their paper, as well as an anndata of our
 cellSNP-lite variant calls (`--minMAF 0.1 --minCOUNT 20`). The benchmark can be run with:
