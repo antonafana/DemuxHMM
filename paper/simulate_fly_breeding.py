@@ -11,13 +11,13 @@ parser = argparse.ArgumentParser(description="Script Parameters")
 
 # Add arguments with default values specified directly
 parser.add_argument('--VCF_df_path', type=str,
-                    default='/mnt/geofflab/c_elegans/fly_dev_continuum/adata_genes_map.csv',
+                    default='data_dir/adata_genes_map.csv',
                     help='Path to the VCF dataframe.')
 parser.add_argument('--VCF_FILENAME', type=str,
-                    default='/mnt/geofflab/c_elegans/fly_dev_continuum/KSA2_snps_on_ref_Wild5B_filtered.vcf',
+                    default='data_dir/KSA2_snps_on_ref_Wild5B_filtered.vcf',
                     help='Path to the VCF file.')
 parser.add_argument('--scrnaseq_adata', type=str,
-                     default='/mnt/geofflab/c_elegans/fly_cell_atlas/head_body_lifted_genes_minified.h5ad',
+                     default='data_dir/head_body_lifted_genes.h5ad',
                      help='Path to the adata file containing scRNA-seq reads.')
 parser.add_argument('--data_path', type=str,
                      default=None,

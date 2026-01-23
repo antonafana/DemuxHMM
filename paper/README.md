@@ -9,8 +9,7 @@ to reflect their own compute environment.
 
 ## Pre-processing
 First, we must get and pre-process the pre-cursor data. The pre-processing creates mapping files between expressed
-genes and SNPs that could conservatively be seen using scRNA-seq technology. Users may omit the python pre-processing
-if desired as we have included the end result.
+genes and SNPs that could conservatively be seen using scRNA-seq technology. 
 
 ```console
 sh get_datasets.sh
