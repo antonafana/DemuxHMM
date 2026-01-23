@@ -4,7 +4,7 @@ import re
 from pandarallel import pandarallel
 pandarallel.initialize(progress_bar=True, verbose=0)
 
-BASE_PATH = 'data_dir'
+BASE_PATH = 'data_dir/'
 ADATA_PATH_BODY = BASE_PATH + 'v2_fca_biohub_body_10x_raw.h5ad'
 ADATA_PATH_HEAD = BASE_PATH + 'v2_fca_biohub_body_10x_raw.h5ad'
 
@@ -12,6 +12,8 @@ ADATA_SAVE_PATH = BASE_PATH + 'head_body_lifted_genes.h5ad'
 WILD5B_LIFTED_GENES_FROM_DM6_PATH = BASE_PATH + 'liftoff_lifted.gtf'
 VCF_PATH = BASE_PATH + 'KSA2_snps_on_ref_Wild5B_filtered.vcf'
 SAVE_PATH = BASE_PATH + 'adata_genes_map.csv'
+
+CUTOFF_UMI = 1000 # The minimum number of UMI we want to allow
 
 # Load adata and merge
 adata_body = anndata.read_h5ad(ADATA_PATH_BODY)
@@ -86,6 +88,12 @@ count_sums_found = adata_found.X.sum(axis=1)
 count_sums = adata.X.sum(axis=1)
 prop_umi_retained = count_sums_found / count_sums
 adata_found.obs['prop_umi_retained'] = prop_umi_retained
+
+# Remove some low quality cells and data we don't use
+row_sums = adata_found.X.sum(axis=1)
+adata_found = adata_found[row_sums >= CUTOFF_UMI, :].copy()
+adata_found.obsm.clear()
+adata_found.varm.clear()
 
 # Save the filtered adata
 adata_found.write_h5ad(ADATA_SAVE_PATH)
