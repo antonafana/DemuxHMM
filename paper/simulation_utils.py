@@ -349,7 +349,7 @@ def run_souporcell(A, D, valid_chromosomes, temp_dir_loc,
 
     # Build command
     cmd = [
-        "souporcell_current/souporcell/souporcell/target/release/souporcell",
+        "souporcell/souporcell/target/release/souporcell",
         "-a", alt_mtx,
         "-r", ref_mtx,
         "-b", barcodes_tsv,

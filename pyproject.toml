@@ -23,7 +23,8 @@ paper = [
     "pysam",
     "anndata",
     "vireoSNP",
-    "pandarallel"
+    "pandarallel",
+    "pyvcf3"
 ]
 
 [tool.setuptools]

@@ -24,6 +24,17 @@ figures. We detail these below. If you want to run souporcell or scSplit, you'll
 the path to their binaries when you run the script. For scSplit, we recommend using my [fork](https://github.com/antonafana/scSplit)
 , which is more up to date package-wise and more numerically stable.
 
+To install scSplit, run the following
+```console
+git clone https://github.com/antonafana/scSplit
+```
+
+To install souporcell3, run the below. If you already have rust installed, skip that step.
+```console
+git clone https://github.com/wheaton5/souporcell.git
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cd souporcell/souporcell && cargo build --release
+```
 
 ### PBMC Dataset
 Running the pre-processing should have downloaded demuxlet's results from their paper, as well as an anndata of our
