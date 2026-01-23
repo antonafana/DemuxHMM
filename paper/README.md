@@ -47,6 +47,16 @@ sh generate_datasets.sh
 sh run_comparison_sweep.sh
 python comparison_fig.py
 ```
+### Figure 6
+This figure focuses on examining the effects of demultiplexing error on trajectory inference using an [urchin snRNA-seq
+dataset](https://journals.biologists.com/dev/article/148/19/dev198614/272307/Developmental-single-cell-transcriptomics-in-the).
+The processed form of the dataset is not currently available, so users will have to create the anndata from the released
+resources. Please contact me if you have questions about how to do this. To run the analysis:
+
+```bash
+python lv_urchin_ari_analysis.py
+```
+
 ### Figure B.1
 This is a parameter sweep of DemuxHMM method on a grid of parameters. To run:
 

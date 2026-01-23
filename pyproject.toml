@@ -25,7 +25,8 @@ paper = [
     "vireoSNP",
     "pandarallel",
     "pyvcf3",
-    "seaborn"
+    "seaborn",
+    "wot"
 ]
 
 [tool.setuptools]
