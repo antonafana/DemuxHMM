@@ -213,7 +213,7 @@ def write_allele_matrices(A, D, snp_dfs, valid_chromosomes, temp_dir_loc):
 
 
 def run_scsplit(A, D, snp_dfs, valid_chromosomes, temp_dir_loc,
-                num_organisms, true_labels=None):
+                num_organisms, true_labels):
     """
     Runs scSplit with Ref/Alt matrices and parses assignments.
     Args:
@@ -260,24 +260,23 @@ def run_scsplit(A, D, snp_dfs, valid_chromosomes, temp_dir_loc,
 
     # Compute ARI if true labels given
     ari_score = None
-    if true_labels is not None:
-        # Map clusters like "SNG-0" -> 0, "SNG-1" -> 1, ...
-        cluster_map = {cl: i for i, cl in enumerate(sorted(assign_df["Cluster"].unique()))}
+    # Map clusters like "SNG-0" -> 0, "SNG-1" -> 1, ...
+    cluster_map = {cl: i for i, cl in enumerate(sorted(assign_df["Cluster"].unique()))}
 
-        pred_labels = []
-        true_labels_matched = []
+    pred_labels = []
+    true_labels_matched = []
 
-        for bc, clust in assignments.items():
-            if bc.startswith("bc_"):
-                idx = int(bc.split("_")[1])
-                if idx < len(true_labels):
-                    pred_labels.append(cluster_map[clust])
-                    true_labels_matched.append(true_labels[idx])
+    for bc, clust in assignments.items():
+        if bc.startswith("bc_"):
+            idx = int(bc.split("_")[1])
+            if idx < len(true_labels):
+                pred_labels.append(cluster_map[clust])
+                true_labels_matched.append(true_labels[idx])
 
-        if pred_labels and true_labels_matched:
-            ari_score = adjusted_rand_score(true_labels_matched, pred_labels)
+    if pred_labels and true_labels_matched:
+        ari_score = adjusted_rand_score(true_labels_matched, pred_labels)
 
-    return assignments, ari_score, time_elapsed
+    return pred_labels, true_labels_matched, ari_score, time_elapsed
 
 def write_vartrix_matrices(A, D, valid_chromosomes, temp_dir_loc):
     """

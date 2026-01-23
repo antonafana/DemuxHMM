@@ -219,7 +219,7 @@ if not params['no_demuxHMM']:
     print(f' HMM score is {ari_score_hmm} and took {time_hmm} seconds to run')
 
 if not params['no_scsplit']:
-    assignments_scsplit, ari_score_scsplit, time_scsplit = utils.run_scsplit(A_filtered, D_filtered, snp_dfs_chrom,
+    assignments_scsplit, gt_filt_scsplit, ari_score_scsplit, time_scsplit = utils.run_scsplit(A_filtered, D_filtered, snp_dfs_chrom,
                                                                              valid_chromosomes, 'temp_dir',
                                                                              num_organisms,
                                                                              true_labels=ground_truth_filtered)
@@ -269,8 +269,6 @@ if not params['no_demuxHMM']:
 if not params['no_scsplit']:
     results_dict['scSplit_ARI'] = [ari_score_scsplit]
     results_dict['scSplit_time'] = [time_scsplit]
-    assignments_dict['assignments_scsplit'] = assignments_scsplit
-    assignments_dict['gt_scsplit'] = ground_truth_filtered
 if not params['no_souporcell']:
     results_dict['souporcell_ARI'] = [ari_score_souporcell]
     results_dict['souporcell_time'] = [time_souporcell]
@@ -287,3 +285,12 @@ results_df.to_csv(f'{params["save_dir"]}results_run_{params["run_num"]}.csv')
 
 assignments_df = pd.DataFrame(assignments_dict)
 assignments_df.to_csv(f'{params["save_dir"]}assignments_run_{params["run_num"]}.csv')
+
+# Handle scsplit separately due to its weird results format
+assignments_dict_scsplit = {}
+if not params['no_scsplit']:
+    assignments_dict_scsplit['assignments_scsplit'] = assignments_scsplit
+    assignments_dict_scsplit['gt_scsplit'] = gt_filt_scsplit
+
+scsplit_df = pd.DataFrame(assignments_dict_scsplit)
+scsplit_df.to_csv(f'{params["save_dir"]}assignments_scsplit_run_{params["run_num"]}.csv')
