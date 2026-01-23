@@ -95,6 +95,11 @@ i=0
 
 for run_num in {0..5}; do
 for num_emb in 10 25 50 75 100 150 200 250 350 500; do
+    # Block until fewer than MAX_JOBS are running
+    while [ "$(jobs -rp | wc -l)" -ge "$MAX_JOBS" ]; do
+      wait -n
+    done
+
   python simulate_fly_breeding.py \
     --data_path "sim_data/G22_20k_runs/run_$run_num/num_emb_{$num_emb}_num_gen_{$num_gen}_avg_UMI_{10000}_num_cells_{$((cell_budget / num_emb))}.pickle" \
     --save_dir "sweeps/vireo/run_$run_num/" \
@@ -107,7 +112,7 @@ for num_emb in 10 25 50 75 100 150 200 250 350 500; do
     --num_threads 80 \
     --no_demuxHMM \
     --no_souporcell \
-    --no_scsplit
+    --no_scsplit &
 
   ((i++))
 done
