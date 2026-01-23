@@ -11,7 +11,7 @@ to reflect their own compute environment.
 First, we must get and pre-process the pre-cursor data. The pre-processing creates mapping files between expressed
 genes and SNPs that could conservatively be seen using scRNA-seq technology. 
 
-```console
+```bash
 sh get_datasets.sh
 python fly_variant_to_gene_mapping_fly_atlas.py
 ```
@@ -25,12 +25,12 @@ the path to their binaries when you run the script. For scSplit, we recommend us
 , which is more up to date package-wise and more numerically stable.
 
 To install scSplit, run the following
-```console
+```bash
 git clone https://github.com/antonafana/scSplit
 ```
 
 To install souporcell3, run the below. If you already have rust installed, skip that step.
-```console
+```bash
 git clone https://github.com/wheaton5/souporcell.git
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cd souporcell/souporcell && cargo build --release
@@ -41,7 +41,7 @@ These figures are a methods comparison sweep over a number of datasets. We pre-g
 methods on each one. Note, this takes a while... You may have to adjust parameters to fit your system specs, or may
 wish to run some of the parameter sweeps concurrently.
 
-```console
+```bash
 mkdir figures
 sh generate_datasets.sh
 sh run_comparison_sweep.sh
@@ -50,7 +50,7 @@ python comparison_fig.py
 ### Figure B.1
 This is a parameter sweep of DemuxHMM method on a grid of parameters. To run:
 
-```console
+```bash
 sh grid_sweep.sh
 python grid_fig.py
 ```
@@ -59,7 +59,7 @@ python grid_fig.py
 This is a performance test where we fix all parameters but the number of breeding generations and evaluate performance.
 To run:
 
-```console
+```bash
 sh generate_datasets_generations.sh
 sh generations_sweep.sh
 python ari_v_generations_fig.py
@@ -69,6 +69,6 @@ python ari_v_generations_fig.py
 Running the pre-processing should have downloaded demuxlet's results from their paper, as well as an anndata of our
 cellSNP-lite variant calls (`--minMAF 0.1 --minCOUNT 20`). The benchmark can be run with:
 
-```console
+```bash
 python PBMC_HMM.py
 ```

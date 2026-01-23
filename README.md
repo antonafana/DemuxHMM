@@ -9,14 +9,14 @@ can be seen at [arXiv link here](arxiv.org). Please cite us if you use the code 
 We offer two installation paths, depending on whether you want to run the benchmarks presented in the paper or not.
 For simple installation, clone this repo and install it with pip:
 
-```console
+```bash
 git clone https://github.com/antonafana/DemuxHMM && cd DemuxHMM
 pip install .
 ```
 
 If you want to run benchmarks from the paper, install the optional dependencies with:
 
-```console
+```bash
 pip install .[paper]
 ```
 
