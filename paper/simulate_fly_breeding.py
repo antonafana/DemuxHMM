@@ -48,6 +48,7 @@ parser.add_argument('--no_scsplit',action="store_true", default=False, help='Whe
 parser.add_argument('--no_souporcell',action="store_true", default=False, help='Whether or not to use souporcell.')
 parser.add_argument('--no_demuxHMM',action="store_true", default=False, help='Whether or not to use demuxHMM.')
 parser.add_argument('--backcross',action="store_true", default=False, help='Whether or not to backcross.')
+parser.add_argument("--snp_usage_percent", type=float, default=1, help="Percentage of SNPs to use.")
 
 params = vars(parser.parse_args())
 print('Running with params: ', params)
@@ -107,6 +108,43 @@ else:
 
 # Save some memory
 del adata
+
+for i in range(len(A)):
+    print('A shape: ', A[i].shape)
+
+# Optionally downsample SNPs
+def downsample_snps_even(A, D, params, rng=None):
+    """
+    Downsample SNPs evenly across chromosomes.
+
+    A, D : lists of arrays, shape (num_cells, num_snps_chr_i)
+    params["snp_usage_percent"] : float in (0, 1]
+    rng : np.random.Generator (optional, for reproducibility)
+    """
+
+    p = params.get("snp_usage_percent", 1.0)
+    if p >= 1.0:
+        return A, D
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    A_ds = []
+    D_ds = []
+
+    for Ai, Di in zip(A, D):
+        n = Ai.shape[1]
+        k = max(1, int(np.floor(p * n)))   # keep at least 1 SNP per chromosome
+
+        idx = rng.choice(n, size=k, replace=False)
+        idx.sort()  # keep genomic order
+
+        A_ds.append(Ai[:, idx])
+        D_ds.append(Di[:, idx])
+
+    return A_ds, D_ds
+
+A, D = downsample_snps_even(A, D, params)
 
 # A and D are lists per chromosome, with A[i] shape (n_cells, n_snps_chr)
 # valid_chromosomes order is the same as A/D
@@ -186,8 +224,10 @@ A_filtered = [A[j][keep_inds, :] for j in range(num_chr)]
 D_filtered = [D[j][keep_inds, :] for j in range(num_chr)]
 ground_truth_filtered = ground_truth[mask]
 
-print('Unique emb remaining', len(np.unique(ground_truth_filtered)), 'Original', num_organisms)
-print(f'The number of total cells is {total_cells}, the number of filtered cells is {len(keep_inds)}')
+emb_remaining = len(np.unique(ground_truth_filtered))
+cells_remaining = len(keep_inds)
+print('Unique emb remaining', emb_remaining, 'Original', num_organisms)
+print(f'The number of total cells is {total_cells}, the number of filtered cells is {cells_remaining}')
 
 # Create an initial T that differentiates between X and other chromosomes
 num_vars = [mat.shape[1] for mat in A_filtered]
@@ -240,7 +280,8 @@ if not params['no_vireo']:
                                                                      num_organisms, ground_truth_filtered)
     print(f'The vireo homogeneity score is {ari_score_vireo} \n Took {time_vireo} seconds')
 
-if not params['no_demuxHMM']:
+alignment_errors = None
+if not params['no_demuxHMM'] and params['snp_usage_percent'] == 1:
     # Find a most likely mapping of assigned cluster tags to original cluster tags for comparing cluster level statistics
     cluster_map = utils.best_cluster_label_mapping(assignments_hmm, ground_truth_filtered)
     alignment_errors = utils.genotype_error_across_organisms(organisms, model['V'], valid_chromosomes, cluster_map)
@@ -262,8 +303,11 @@ assignments_dict = {}
 
 if not params['no_demuxHMM']:
     results_dict['hmm_score'] = [ari_score_hmm]
-    results_dict['alignment_error'] = [alignment_errors['mean_error']]
+    if alignment_errors is not None:
+        results_dict['alignment_error'] = [alignment_errors['mean_error']]
     results_dict['hmm_time'] = [time_hmm]
+    results_dict['emb_remaining'] = emb_remaining
+    results_dict['cells_remaining'] = cells_remaining
     assignments_dict['assignments_hmm'] = assignments_hmm
     assignments_dict['gt_hmm'] = ground_truth_filtered
 if not params['no_scsplit']:

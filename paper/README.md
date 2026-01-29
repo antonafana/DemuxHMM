@@ -76,6 +76,15 @@ sh generations_sweep.sh
 python ari_v_generations_fig.py
 ```
 
+### Figure B.3
+This figure evaluates performance with respect to SNP downsampling. It assumes the datasets from the grid sweep figure
+have already been generated. To run:
+
+```bash
+sh downsampling_sweep.sh
+python downsampling_fig.py
+```
+
 ### PBMC Dataset
 Running the pre-processing should have downloaded demuxlet's results from their paper, as well as an anndata of our
 cellSNP-lite variant calls (`--minMAF 0.1 --minCOUNT 20`). The benchmark can be run with:
