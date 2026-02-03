@@ -246,7 +246,7 @@ for c, name in enumerate(valid_chromosomes):
 
 # Run the HMM model
 theta_init = np.array([0.006, 0.469, 0.988])
-pi_init = None #np.array([0.74, 0.01, 0.25])
+pi_init = None
 if not params['no_demuxHMM']:
     assignments_hmm, ari_score_hmm, time_hmm, model = utils.run_demuxHMM(A_filtered, D_filtered, num_organisms,
                                                              params['TOL'], ground_truth_filtered,

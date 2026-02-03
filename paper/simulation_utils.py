@@ -559,15 +559,11 @@ def simulate_dataset(params, snp_dfs_chrom, adata):
     var_adam_chromosomes = {}
     wild_type_eve_chromosomes = {}
 
-    # Make a wild type organism's chromosomes and a variant organism's chromosomes
-    var_adam_chromosomes = {}
-    wild_type_eve_chromosomes = {}
-
     for chrom in valid_chromosomes:
         chrom_len = chrom_lengths[chrom]
         chrom_snp_locs = snp_dfs_chrom[chrom]['loc'].to_numpy()
 
-        # Male (Adam): make X haploid (one chromatid), others diploid
+        # Male (Adam): make X haploid (one chromosome), others diploid
         if chrom == 'X':
             var_states = np.ones(shape=(1, len(chrom_snp_locs)))
         else:
