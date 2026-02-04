@@ -425,13 +425,12 @@ class BreedingExperiment:
         Returns: list of BreedingPools indexed by generation
         """
 
-        generations = [self.starting_pool]
+        current_generation = self.starting_pool
 
         for i in range(1, num_generations + 1):
-            next_generation = generations[i-1].breed_generation(self.offspring_per_generation,
+            current_generation = current_generation.breed_generation(self.offspring_per_generation,
                                                                 n_processes=n_proc, backcross=backcross)
-            generations.append(next_generation)
 
-        return generations
+        return current_generation
 
 

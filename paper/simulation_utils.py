@@ -608,15 +608,12 @@ def simulate_dataset(params, snp_dfs_chrom, adata):
                                                    males_cross_over=params['males_cross_over'])
 
     if params['backcross']:
-        generations = experiment.run_experiment(params['num_generations'],
+        final_gen = experiment.run_experiment(params['num_generations'],
                                                 n_proc=params['num_threads'],
                                                 backcross=var_adam)
     else:
-        generations = experiment.run_experiment(params['num_generations'],
+        final_gen = experiment.run_experiment(params['num_generations'],
                                                 n_proc=params['num_threads'])
-
-    # Count the mean number of transitions seen on a chromosome (pair of chromatids)
-    final_gen = generations[-1]
 
     if params['gender_filter'] == 'male':
         final_gen.organism_list = [org for org in final_gen.organism_list if org.gender == 'M']
