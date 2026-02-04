@@ -44,7 +44,10 @@ wish to run some of the parameter sweeps concurrently.
 ```bash
 mkdir figures
 sh generate_datasets.sh
-sh run_comparison_sweep.sh
+sh comparison_demuxHMM.sh
+sh comparison_scsplit.sh
+sh comparison_vireo.sh
+sh comparison_sorc3.sh
 python comparison_fig.py
 ```
 ### Figure 6
