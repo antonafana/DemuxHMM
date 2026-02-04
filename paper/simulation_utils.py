@@ -148,7 +148,7 @@ def run_demuxHMM(A, D, num_organisms, tolerance, ground_truth, mean_transitions=
     for _ in range(num_repeats):
         model = HMMModel(A, D, num_organisms, mean_transitions,
                          threads=num_threads, theta_init=theta_init, T_init=T_init, pi_init=pi_init)
-        model.solve(tolerance, num_inits=0)
+        model.solve(tolerance, iters=50, num_inits=0)
         model_out = model.get_output()
         all_models.append(model_out)
         assignments = np.argmax(model_out['z_probs'], axis=1)
