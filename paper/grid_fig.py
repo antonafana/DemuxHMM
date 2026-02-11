@@ -9,6 +9,7 @@ PARAM_X = "avg_UMI"           # name of first parameter in JSON
 PARAM_Y = "num_generations"           # name of second parameter in JSON
 PARAM_X_LABEL = "UMI Per Cell"     # human-readable name for x-axis
 PARAM_Y_LABEL = "Number of Generations"     # human-readable name for y-axis
+REPEATS = 2 # The number of repeats to the data
 
 # Font settings for readability in LaTeX
 plt.rcParams.update({
@@ -22,39 +23,38 @@ plt.rcParams.update({
 # Collect all runs
 records = []
 
-for filename in os.listdir(DATA_DIR):
-    if filename.startswith("params_run_") and filename.endswith(".json"):
-        run_id = filename[len("params_run_"):-len(".json")]
-        json_path = os.path.join(DATA_DIR, filename)
-        csv_path = os.path.join(DATA_DIR, f"results_run_{run_id}.csv")
+for i in range(REPEATS):
+    repeat_dir = os.path.join(DATA_DIR, f"run_{i}/")
+    for filename in os.listdir(repeat_dir):
+        if filename.startswith("params_run_") and filename.endswith(".json"):
+            run_id = filename[len("params_run_"):-len(".json")]
+            json_path = os.path.join(repeat_dir, filename)
+            csv_path = os.path.join(repeat_dir, f"results_run_{run_id}.csv")
 
-        if not os.path.exists(csv_path):
-            continue
+            if not os.path.exists(csv_path):
+                continue
 
-        # Read params
-        with open(json_path, "r") as f:
-            params = json.load(f)
+            # Read params
+            with open(json_path, "r") as f:
+                params = json.load(f)
 
-        # Read results
-        df_res = pd.read_csv(csv_path)
+            # Read results
+            df_res = pd.read_csv(csv_path)
 
-        hmm_score = df_res.loc[0, "hmm_score"] if "hmm_score" in df_res.columns else None
+            hmm_score = df_res.loc[0, "hmm_score"] if "hmm_score" in df_res.columns else None
 
-        records.append({
-            PARAM_X: float(params[PARAM_X]),
-            PARAM_Y: float(params[PARAM_Y]),
-            "hmm_score": hmm_score,
-        })
+            records.append({
+                PARAM_X: float(params[PARAM_X]),
+                PARAM_Y: float(params[PARAM_Y]),
+                "hmm_score": hmm_score,
+            })
 
 # Convert to DataFrame
 df = pd.DataFrame(records)
+df = df.groupby([PARAM_Y, PARAM_X], as_index=False).agg(mean_hmm_score=("hmm_score", "mean"))
 
 # Pivot for heatmaps (numeric sort of both axes)
-hmm_pivot = df.pivot(index=PARAM_Y, columns=PARAM_X, values="hmm_score")
-hmm_pivot = hmm_pivot.sort_index(ascending=True).sort_index(axis=1, ascending=True)
-
-# Pivot for heatmaps (numeric sort of both axes)
-hmm_pivot   = df.pivot(index=PARAM_Y, columns=PARAM_X, values="hmm_score")
+hmm_pivot   = df.pivot(index=PARAM_Y, columns=PARAM_X, values="mean_hmm_score")
 hmm_pivot   = hmm_pivot.sort_index(ascending=True).sort_index(axis=1, ascending=True)
 
 # Integer tick labels if possible
