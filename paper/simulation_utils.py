@@ -172,7 +172,7 @@ def run_demuxHMM(A, D, num_organisms, tolerance, ground_truth, mean_transitions=
 
 
 
-def write_allele_matrices(A, D, snp_dfs, valid_chromosomes, temp_dir_loc):
+def write_allele_matrices(A, D, valid_chromosomes, temp_dir_loc):
     """
     Writes alternate (A) and reference (R) allele count matrices to CSV format,
     concatenating across all chromosomes.
@@ -182,8 +182,7 @@ def write_allele_matrices(A, D, snp_dfs, valid_chromosomes, temp_dir_loc):
     A_dfs, R_dfs = [], []
 
     for i, chrom in enumerate(valid_chromosomes):
-        snp_df = snp_dfs[chrom]
-        snv_labels = snp_df["chromosome"].astype(str) + ":" + snp_df["loc"].astype(str)
+        snv_labels = [chrom + ":" + str(i) for i in range(A[i].shape[1])]
 
         A_matrix = A[i]
         R_matrix = D[i] - A[i]
@@ -212,7 +211,7 @@ def write_allele_matrices(A, D, snp_dfs, valid_chromosomes, temp_dir_loc):
     return A_path, R_path
 
 
-def run_scsplit(A, D, snp_dfs, valid_chromosomes, temp_dir_loc,
+def run_scsplit(A, D, valid_chromosomes, temp_dir_loc,
                 num_organisms, true_labels):
     """
     Runs scSplit with Ref/Alt matrices and parses assignments.
@@ -227,7 +226,7 @@ def run_scsplit(A, D, snp_dfs, valid_chromosomes, temp_dir_loc,
     """
 
     # Write allele matrices
-    A_csv, R_csv = write_allele_matrices(A, D, snp_dfs, valid_chromosomes, temp_dir_loc)
+    A_csv, R_csv = write_allele_matrices(A, D, valid_chromosomes, temp_dir_loc)
 
     # Unique run identifier
     uid = uuid.uuid4().hex
@@ -513,7 +512,6 @@ def simulate_dataset(params, snp_dfs_chrom, adata):
     print(f'Adata After', adata.shape)
 
     adata.X = sklearn.preprocessing.normalize(adata.X, norm='l1')
-    print(adata)
 
     # Make the gene to snp mapping for each chromosome
     gene_to_snp_maps = {}
