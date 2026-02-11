@@ -60,6 +60,15 @@ num_chr = len(valid_chromosomes)
 
 # Read pre-processed df of SNPs that can be captured with scRNA-seq (last 150 bp)
 snp_df = pd.read_csv(params['VCF_df_path'], sep='\t')
+
+# Filter to SNPs on genes that contain multiple
+prop_to_keep = 0.15
+num_snps_by_gene = snp_df['gene_name'].value_counts()
+top_n = int(prop_to_keep*len(num_snps_by_gene))
+top_genes = num_snps_by_gene.head(top_n)
+snp_df = snp_df[snp_df['gene_name'].isin(set(top_genes.index))].copy()
+
+# Now further keep only the ones scRNA-seq can see
 snp_df = snp_df[snp_df['last_150']].copy()
 
 # Rename contigs to chromosomes
@@ -109,9 +118,6 @@ else:
 # Save some memory
 del adata
 
-for i in range(len(A)):
-    print('A shape: ', A[i].shape)
-
 # Optionally downsample SNPs
 def downsample_snps_even(A, D, params, rng=None):
     """
@@ -145,6 +151,9 @@ def downsample_snps_even(A, D, params, rng=None):
     return A_ds, D_ds
 
 A, D = downsample_snps_even(A, D, params)
+
+for i in range(len(A)):
+    print('A shape: ', A[i].shape)
 
 # A and D are lists per chromosome, with A[i] shape (n_cells, n_snps_chr)
 # valid_chromosomes order is the same as A/D
@@ -259,7 +268,7 @@ if not params['no_demuxHMM']:
     print(f' HMM score is {ari_score_hmm} and took {time_hmm} seconds to run')
 
 if not params['no_scsplit']:
-    assignments_scsplit, gt_filt_scsplit, ari_score_scsplit, time_scsplit = utils.run_scsplit(A_filtered, D_filtered, snp_dfs_chrom,
+    assignments_scsplit, gt_filt_scsplit, ari_score_scsplit, time_scsplit = utils.run_scsplit(A_filtered, D_filtered,
                                                                              valid_chromosomes, 'temp_dir',
                                                                              num_organisms,
                                                                              true_labels=ground_truth_filtered)
@@ -280,16 +289,6 @@ if not params['no_vireo']:
                                                                      num_organisms, ground_truth_filtered)
     print(f'The vireo homogeneity score is {ari_score_vireo} \n Took {time_vireo} seconds')
 
-alignment_errors = None
-if not params['no_demuxHMM'] and params['snp_usage_percent'] == 1:
-    # Find a most likely mapping of assigned cluster tags to original cluster tags for comparing cluster level statistics
-    cluster_map = utils.best_cluster_label_mapping(assignments_hmm, ground_truth_filtered)
-    alignment_errors = utils.genotype_error_across_organisms(organisms, model['V'], valid_chromosomes, cluster_map)
-    unique, counts = np.unique(assignments_hmm, return_counts=True)
-# print(f'Errors are {alignment_errors}')
-#print(f'Assignments are {assignments_hmm} with a cluster map {cluster_map}')
-# print(f'Unique assignments are {dict(zip(unique, counts))}')
-
 # Make the save dir if needed
 if not os.path.exists(params['save_dir']):
     os.makedirs(params['save_dir'])
@@ -303,8 +302,6 @@ assignments_dict = {}
 
 if not params['no_demuxHMM']:
     results_dict['hmm_score'] = [ari_score_hmm]
-    if alignment_errors is not None:
-        results_dict['alignment_error'] = [alignment_errors['mean_error']]
     results_dict['hmm_time'] = [time_hmm]
     results_dict['emb_remaining'] = emb_remaining
     results_dict['cells_remaining'] = cells_remaining
@@ -330,11 +327,10 @@ results_df.to_csv(f'{params["save_dir"]}results_run_{params["run_num"]}.csv')
 assignments_df = pd.DataFrame(assignments_dict)
 assignments_df.to_csv(f'{params["save_dir"]}assignments_run_{params["run_num"]}.csv')
 
-# Handle scsplit separately due to its weird results format
+# Handle scsplit separately due to its slightly weird results format
 assignments_dict_scsplit = {}
 if not params['no_scsplit']:
     assignments_dict_scsplit['assignments_scsplit'] = assignments_scsplit
     assignments_dict_scsplit['gt_scsplit'] = gt_filt_scsplit
-
-scsplit_df = pd.DataFrame(assignments_dict_scsplit)
-scsplit_df.to_csv(f'{params["save_dir"]}assignments_scsplit_run_{params["run_num"]}.csv')
+    scsplit_df = pd.DataFrame(assignments_dict_scsplit)
+    scsplit_df.to_csv(f'{params["save_dir"]}assignments_scsplit_run_{params["run_num"]}.csv')
