@@ -22,7 +22,7 @@ for num_gen in {1..25}; do
     --avg_UMI 100 \
     --num_cells_per_org 1 \
     --offspring_per_generation 1000 \
-    --num_threads 22 \
+    --num_threads 15 \
     --no_demuxHMM \
     --no_souporcell \
     --no_vireo \

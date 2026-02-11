@@ -14,7 +14,7 @@ for num_gen in 2 4 6 8 10 12 14 16 18 20 22 24; do
     --avg_UMI 10000 \
     --num_cells_per_org 250 \
     --offspring_per_generation 100 \
-    --num_threads 80 \
+    --num_threads 15 \
     --no_demuxHMM \
     --no_scsplit \
     --no_souporcell \

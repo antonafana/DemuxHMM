@@ -5,7 +5,7 @@ export NUMBA_CUDA_USE_NVIDIA_BINDING=0
 i=0
 cell_budget=20000
 num_gen=22
-MAX_JOBS=2
+MAX_JOBS=3
 
 for run_num in {0..5}; do
 for num_emb in 10 25 50 75 100 150 200 250 350 500; do
@@ -24,7 +24,7 @@ for num_emb in 10 25 50 75 100 150 200 250 350 500; do
     --avg_UMI 10000 \
     --num_cells_per_org $((cell_budget / num_emb)) \
     --offspring_per_generation $num_emb \
-    --num_threads 80 \
+    --num_threads 60 \
     --no_demuxHMM \
     --no_scsplit \
     --no_vireo &
