@@ -9,7 +9,7 @@ PARAM_X = "avg_UMI"           # name of first parameter in JSON
 PARAM_Y = "num_generations"           # name of second parameter in JSON
 PARAM_X_LABEL = "UMI Per Cell"     # human-readable name for x-axis
 PARAM_Y_LABEL = "Number of Generations"     # human-readable name for y-axis
-REPEATS = 2 # The number of repeats to the data
+REPEATS = 6 # The number of repeats to the data
 
 # Font settings for readability in LaTeX
 plt.rcParams.update({
