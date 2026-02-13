@@ -11,7 +11,7 @@ sweep_dirs = {
 
 num_runs = 10
 variable_sweep = 'snp_usage_percent'
-common_name = 'Proportion of SNPs Used (8136 Total)'
+common_name = 'Proportion of SNPs Used (1,233 Total)'
 
 variable_values_set = set()
 ari_data = {method: {} for method in sweep_dirs}
