@@ -6,12 +6,13 @@ import os
 
 # Params for the sweep
 sweep_dirs = {
-    'DemuxHMM': 'sweeps/generations/',
+    'DemuxHMM': 'sweeps/grid_sweep/',
 }
 
 num_runs = 6
 variable_sweep = 'num_generations'  # The variable we are sweeping over
 common_name = 'Number of Generations'
+UMI_level=10000
 
 # Data containers
 variable_values_set = set()
@@ -35,6 +36,10 @@ for method, base_dir in sweep_dirs.items():
 
             # Load sweep variable
             params_json = json.load(open(params_file, 'r'))
+            # This is a zoomed in view to a level of the grid sweep at 10k UMI
+            if params_json['avg_UMI'] != UMI_level:
+                continue
+
             var_val = params_json[variable_sweep]
             variable_values_set.add(var_val)
 
@@ -87,5 +92,5 @@ plt.xticks([2*i for i in range(13)], fontsize=20)
 plt.yticks(fontsize=20)
 plt.ylim(0.6, 1)
 plt.legend(fontsize=20)
-plt.savefig('figures/ari_v_generations_errorbars.pdf')
+plt.savefig('figures/ari_v_generations.pdf')
 plt.show()

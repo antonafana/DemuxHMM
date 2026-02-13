@@ -70,12 +70,10 @@ python grid_fig.py
 ```
 
 ### Figure B.2
-This is a performance test where we fix all parameters but the number of breeding generations and evaluate performance.
+This is a look at the results of the grid sweep focusing on performance as the number of generations changes.
 To run:
 
 ```bash
-sh generate_datasets_generations.sh
-sh generations_sweep.sh
 python ari_v_generations_fig.py
 ```
 
