@@ -9,7 +9,18 @@ sweep_dirs = {
     'DemuxHMM': 'sweeps/demuxHMM/',
     'Vireo': 'sweeps/vireo/',
     'scSplit': 'sweeps/scsplit/',
-    'souporcell3': 'sweeps/sorc3/'
+    'souporcell3': 'sweeps/sorc3/',
+    'DemuxHMM 2500 UMI': 'sweeps/demuxHMM_umi_2500/',
+    'scSplit 2500 UMI': 'sweeps/scsplit_umi_2500/',
+}
+
+colormap = {
+    'DemuxHMM': 'tab:blue',
+    'DemuxHMM 2500 UMI': 'tab:blue',
+    'scSplit': 'tab:green',
+    'scSplit 2500 UMI': 'tab:green',
+    'souporcell3': 'tab:red',
+    'Vireo': 'tab:orange',
 }
 
 num_runs = 6
@@ -57,7 +68,13 @@ for method, base_dir in sweep_dirs.items():
             elif method == 'DemuxHMM':
                 time_data[method][var_val].append(results_df['hmm_time'].mean())
                 ari_data[method][var_val].append(results_df['hmm_score'].mean())
+            elif method == 'DemuxHMM 2500 UMI':
+                time_data[method][var_val].append(results_df['hmm_time'].mean())
+                ari_data[method][var_val].append(results_df['hmm_score'].mean())
             elif method == 'scSplit':
+                time_data[method][var_val].append(results_df['scSplit_time'].mean())
+                ari_data[method][var_val].append(results_df['scSplit_ARI'].mean())
+            elif method == 'scSplit 2500 UMI':
                 time_data[method][var_val].append(results_df['scSplit_time'].mean())
                 ari_data[method][var_val].append(results_df['scSplit_ARI'].mean())
             elif method == 'souporcell3':
@@ -90,38 +107,55 @@ for method in sweep_dirs:
             ari_means[method].append(np.nan)
             ari_stds[method].append(np.nan)
 
-# Plot 1: Time with error bars
-plt.figure(figsize=(10, 10))
-for method in sweep_dirs:
-    y = np.array(time_means[method])
-    yerr = np.array(time_stds[method])
-    x = np.array(variable_values)
-    mask = ~np.isnan(y)
-    plt.errorbar(x[mask], y[mask], yerr=yerr[mask], marker='o', linewidth=2,
-                 linestyle='-', alpha=0.8, capsize=5)
-plt.legend(list(sweep_dirs.keys()), fontsize=20)
-plt.xlabel(common_name, fontsize=25)
-plt.ylabel('Time Taken (s)', fontsize=25)
-plt.yscale('log')
-plt.xticks(fontsize=20)
-plt.yticks(fontsize=20)
-plt.savefig('figures/time_taken_errorbars.pdf')
-plt.show()
+print('Variable values', variable_values)
+print('ARI means: ', ari_means)
 
-# Plot 2: ARI with error bars
-plt.figure(figsize=(10, 10))
+fig = plt.figure(figsize=(20, 13))
+# Plot 1: ARI with error bars
+ax = plt.subplot(121)
 for method in sweep_dirs:
     y = np.array(ari_means[method])
     yerr = np.array(ari_stds[method])
     x = np.array(variable_values)
     mask = ~np.isnan(y)
-    plt.errorbar(x[mask], y[mask], yerr=yerr[mask], marker='o', linewidth=2,
-                 linestyle='-', alpha=0.8, capsize=5)
-plt.legend(list(sweep_dirs.keys()), fontsize=20)
-plt.xlabel(common_name, fontsize=25)
-plt.ylabel('ARI', fontsize=25)
-plt.xticks(fontsize=20)
-plt.yticks(fontsize=20)
+    if method == 'scSplit 2500 UMI' or method == 'DemuxHMM 2500 UMI':
+        plt.errorbar(x[mask], y[mask], yerr=yerr[mask], marker='d', linewidth=2,
+                     linestyle='-', alpha=0.25, capsize=5, markersize=9, color=colormap[method])
+    else:
+        plt.errorbar(x[mask], y[mask], yerr=yerr[mask], marker='o', linewidth=2,
+                 linestyle='-', alpha=0.8, capsize=5, markersize=9, color=colormap[method])
+plt.legend(list(sweep_dirs.keys()), fontsize=26, frameon=False)
+plt.title('A', loc='left', fontsize=30, fontweight='bold')
+plt.ylabel('ARI', fontsize=35)
+plt.xticks(fontsize=30)
+plt.yticks(fontsize=30)
+ax.tick_params(axis='both', which='major', length=10, width=3)
 plt.ylim(0, 1)
-plt.savefig('figures/methods_comparison_20k_errorbars.pdf')
+
+ax = plt.subplot(122)
+# Plot 2: Time with error bars
+for method in sweep_dirs:
+    # The 2500 UMI runs don't add much info for the time comparison
+    if method == 'scSplit 2500 UMI' or method == 'DemuxHMM 2500 UMI':
+        continue
+
+    y = np.array(time_means[method])
+    yerr = np.array(time_stds[method])
+    x = np.array(variable_values)
+    mask = ~np.isnan(y)
+    plt.errorbar(x[mask], y[mask], yerr=yerr[mask], marker='o', linewidth=2,
+                 linestyle='-', alpha=0.8, capsize=5, markersize=9, color=colormap[method])
+plt.title('B', loc='left', fontsize=30, fontweight='bold')
+plt.ylabel('Time Taken (s)', fontsize=35)
+plt.yscale('log')
+plt.xticks(fontsize=30)
+plt.yticks(fontsize=30)
+ax.tick_params(axis='both', which='major', length=10, width=3)
+ax.tick_params(axis='both', which='minor', length=7, width=1)
+
+# Make joint X label
+fig.supxlabel(common_name, fontsize=35)
+fig.tight_layout()
+
+plt.savefig('figures/methods_comparison_20k.pdf')
 plt.show()

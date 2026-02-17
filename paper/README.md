@@ -36,7 +36,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cd souporcell/souporcell && cargo build --release
 ```
 
-### Figures 4 and 5
+### Figure 4
 These figures are a methods comparison sweep over a number of datasets. We pre-generate the datasets and then run the 
 methods on each one. Note, this takes a while... You may have to adjust parameters to fit your system specs, or may
 wish to run some of the parameter sweeps concurrently.
@@ -44,13 +44,16 @@ wish to run some of the parameter sweeps concurrently.
 ```bash
 mkdir figures
 sh generate_datasets.sh
+sh generate_datasets_2500.sh
 sh comparison_demuxHMM.sh
 sh comparison_scsplit.sh
 sh comparison_vireo.sh
 sh comparison_sorc3.sh
+sh comparison_demuxHMM_2500.sh
+sh comparison_scsplit_2500.sh
 python comparison_fig.py
 ```
-### Figure 6
+### Figure 5
 This figure focuses on examining the effects of demultiplexing error on trajectory inference using a [sea urchin snRNA-seq
 dataset](https://journals.biologists.com/dev/article/148/19/dev198614/272307/Developmental-single-cell-transcriptomics-in-the).
 We use a version of the dataset processed for use in python. Users should be able to obtain similar results by converting
