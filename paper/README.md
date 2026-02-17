@@ -53,6 +53,13 @@ sh comparison_demuxHMM_2500.sh
 sh comparison_scsplit_2500.sh
 python comparison_fig.py
 ```
+For the high embryo count test simply run
+
+```bash
+sh comparison_demuxHMM_high_emb.sh
+python high_emb_stats.py
+```
+
 ### Figure 5
 This figure focuses on examining the effects of demultiplexing error on trajectory inference using a [sea urchin snRNA-seq
 dataset](https://journals.biologists.com/dev/article/148/19/dev198614/272307/Developmental-single-cell-transcriptomics-in-the).
