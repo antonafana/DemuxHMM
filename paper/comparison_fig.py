@@ -7,8 +7,8 @@ import numpy as np
 # Parameters
 sweep_dirs = {
     'DemuxHMM': 'sweeps/demuxHMM/',
-    'Vireo': 'sweeps/vireo/',
     'scSplit': 'sweeps/scsplit/',
+    'Vireo': 'sweeps/vireo/',
     'souporcell3': 'sweeps/sorc3/',
     'DemuxHMM 2500 UMI': 'sweeps/demuxHMM_umi_2500/',
     'scSplit 2500 UMI': 'sweeps/scsplit_umi_2500/',
@@ -110,9 +110,9 @@ for method in sweep_dirs:
 print('Variable values', variable_values)
 print('ARI means: ', ari_means)
 
-fig = plt.figure(figsize=(20, 13))
+fig = plt.figure(figsize=(10, 20))
 # Plot 1: ARI with error bars
-ax = plt.subplot(121)
+ax = plt.subplot(211)
 for method in sweep_dirs:
     y = np.array(ari_means[method])
     yerr = np.array(ari_stds[method])
@@ -124,7 +124,7 @@ for method in sweep_dirs:
     else:
         plt.errorbar(x[mask], y[mask], yerr=yerr[mask], marker='o', linewidth=2,
                  linestyle='-', alpha=0.8, capsize=5, markersize=9, color=colormap[method])
-plt.legend(list(sweep_dirs.keys()), fontsize=26, frameon=False)
+plt.legend(list(sweep_dirs.keys()), fontsize=23, frameon=False)
 plt.title('A', loc='left', fontsize=30, fontweight='bold')
 plt.ylabel('ARI', fontsize=35)
 plt.xticks(fontsize=30)
@@ -132,7 +132,7 @@ plt.yticks(fontsize=30)
 ax.tick_params(axis='both', which='major', length=10, width=3)
 plt.ylim(0, 1)
 
-ax = plt.subplot(122)
+ax = plt.subplot(212)
 # Plot 2: Time with error bars
 for method in sweep_dirs:
     # The 2500 UMI runs don't add much info for the time comparison
@@ -157,5 +157,5 @@ ax.tick_params(axis='both', which='minor', length=7, width=1)
 fig.supxlabel(common_name, fontsize=35)
 fig.tight_layout()
 
-plt.savefig('figures/methods_comparison_20k.pdf')
+plt.savefig('figures/methods_comparison_20k_vertical.pdf')
 plt.show()
