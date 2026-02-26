@@ -3,7 +3,7 @@ DemuxHMM is a highly performant demultiplexing method for scRNA-seq and other om
 Markov Model to capture structure on SNPs when individuals are created with a breeding scheme. DemuxHMM is most powerful
 with this structure, but it can also work on unstructured datasets. For fast computation, we leverage parallelization on
 GPU to achieve significantly faster performance than competing methods on large datasets. The manuscript for the method
-can be seen at [arXiv link here](arxiv.org). Please cite us if you use the code in your work.
+can be seen on [bioRxiv](https://www.biorxiv.org/content/10.64898/2026.02.23.703392v1). Please cite us if you use the code in your work.
 
 ## Installation
 We offer two installation paths, depending on whether you want to run the benchmarks presented in the paper or not.
