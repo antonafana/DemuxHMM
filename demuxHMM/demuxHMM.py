@@ -13,9 +13,9 @@ def xlogy(x, y):
     """
     Computes xlog(y) so that it is 0 if x is 0.
     Args:
-        x:
-        y:
-    Returns:
+        x: float >= 0
+        y: float >= 0
+    Returns: xlog(y)
     """
     if x == 0:
         return 0
@@ -27,12 +27,13 @@ def xlog1py(x, y):
     """
     Calculates xlog1p(y) so that it is 0 if x is 0.
     Args:
-        x:
-        y:
-    Returns:
+        x: float >= 0
+        y: float >= 0
+    Returns: xlog(1 + y)
     """
     if x == 0:
         return 0
+
     return x*np.log1p(y)
 
 @njit
@@ -52,21 +53,51 @@ def binom_logpmf(k=1, n=1, p=0.5):
 
 @cuda.jit(device=True)
 def xlogy_gpu(x, y):
+    """
+    Computes xlog(y) so that it is 0 if x is 0. This is the gpu code version.
+    Args:
+        x: float >= 0
+        y: float >= 0
+    Returns: xlog(y)
+    """
     return 0.0 if x == 0 else x * math.log(y)
 
 @cuda.jit(device=True)
 def xlog1py_gpu(x, y):
+    """
+    Calculates xlog1p(y) so that it is 0 if x is 0. This is the gpu code version.
+    Args:
+        x: float >= 0
+        y: float >= 0
+    Returns: xlog(1 + y)
+    """
     return 0.0 if x == 0 else x * math.log1p(y)
 
 @cuda.jit(device=True)
 def binom_logpmf_gpu(k, n, p):
+    """
+    The log pmf function for the binomial distribution. Compatible with gpu.
+    Args:
+        k: Number of successes.
+        n: Total number of draws.
+        p: Probability of success.
+
+    Returns: The binomial log-pmf.
+    """
     p = min(max(p, 1e-6), 1 - 1e-6)  # clamp probability away from 0 or 1
     combiln = lgamma(n + 1) - (lgamma(k + 1) + lgamma(n - k + 1))
     return combiln + xlogy_gpu(k, p) + xlog1py_gpu(n - k, -p)
 
 @cuda.jit(device=True)
 def _lse3(a0, a1, a2):
-    # logsumexp for 3 floats (stable)
+    """
+    Stabilized log-sum-exp for three floats.
+    Args:
+        a0: float
+        a1: float
+        a2: float
+    Returns: LSE([a0, a1, a2])
+    """
     m = max(a0, a1) if max(a0, a1) > a2 else a2
     return math.log(math.exp(a0 - m) + math.exp(a1 - m) + math.exp(a2 - m)) + m
 
@@ -344,7 +375,7 @@ def forward_backward_likelihood_kernel(log_likelihoods, thetas, T, pi, kappas,
     log_alpha = cuda.local.array((4500, 3), dtype=float32)
     log_beta = cuda.local.array((4500, 3), dtype=float32)
 
-    # === Forward pass ===
+    # Forward pass
     for t in range(num_states):
         # Theta prior (rough beta_logpdf)
         prior = xlog1py_gpu(betas[t] - 1.0, -thetas[t]) + xlogy_gpu(alphas[t] - 1.0, thetas[t])
@@ -363,7 +394,7 @@ def forward_backward_likelihood_kernel(log_likelihoods, thetas, T, pi, kappas,
                            math.exp(vals[2] - max_val)) + max_val
             log_alpha[l][t] = log_likelihoods[c_idx, k_idx, l, t] + lse
 
-    # === Backward pass ===
+    # Backward pass
     for t in range(num_states):
         log_beta[L - 1][t] = 0.0
 
@@ -382,7 +413,7 @@ def forward_backward_likelihood_kernel(log_likelihoods, thetas, T, pi, kappas,
                            math.exp(vals[2] - max_val)) + max_val
             log_beta[l][t] = lse
 
-    # === Write to global memory
+    # Write to global memory
     for l in range(L):
         for t in range(num_states):
             log_alphas[c_idx, k_idx, l, t] = log_alpha[l][t]
@@ -469,19 +500,19 @@ def chain_probs_kernel(log_alphas, log_betas, chain_lens, out_probs,
     if l >= L:
         return
 
-    # log p(data) = logsumexp(log_alpha at final position over states)
+    # log p(data) = logsumexp(log_alpha at final state position)
     la0 = log_alphas[c, k, L - 1, 0]
     la1 = log_alphas[c, k, L - 1, 1]
     la2 = log_alphas[c, k, L - 1, 2]
     log_joint = _lse3(la0, la1, la2)
 
-    # unnormalized posteriors in linear space
+    # Unnormalized posteriors in linear space
     s0 = math.exp(log_alphas[c, k, l, 0] + log_betas[c, k, l, 0] - log_joint)
     s1 = math.exp(log_alphas[c, k, l, 1] + log_betas[c, k, l, 1] - log_joint)
     s2 = math.exp(log_alphas[c, k, l, 2] + log_betas[c, k, l, 2] - log_joint)
 
     s = s0 + s1 + s2
-    # numerical guard + normalization
+    # Numerical guard + normalization
     if s <= 0.0 or math.isnan(s) or math.isinf(s):
         out_probs[c, k, l, 0] = 1.0 / 3.0
         out_probs[c, k, l, 1] = 1.0 / 3.0
@@ -531,11 +562,10 @@ class HMMModel:
                  z_init=None, threads=80, T_init=None, theta_init=None, pi_init=None,
                  do_theta_update=False, do_pi_update=True, use_gpu=True):
         """
-
         Args:
             A: list of alternative allele counts (n_cells x n_snps).
             D: List of total counts depth at each snp (n_cells x n_snps).
-            num_chr: The number of chromosomes being modelled.
+            num_chr: The number of chromosomes being modeled.
             num_clusters: The expected number of clusters.
             expected_transitions: An array of expected transitions per chromosome.
             z_init: An initial clustering.
@@ -785,7 +815,7 @@ class HMMModel:
 
         if self.use_gpu:
             try:
-                # Pack lists -> padded tensors for GPU
+                # Pack lists into padded tensors for GPU
                 la_pad, lb_pad, max_len = self._pack_logs_to_padded()
 
                 # Move to device
@@ -819,7 +849,7 @@ class HMMModel:
             except Exception as e:
                 print(f"[GPU Fallback] Chain probs GPU failed: {e}. Falling back to CPU.")
 
-        # === CPU fallback (original implementation) ===
+        # CPU fallback (original implementation)
         for c in tqdm(range(self.num_chr), desc='chain probs'):
             chain_length = len(self.V[c][0])
 
@@ -831,7 +861,7 @@ class HMMModel:
                     print('log_prob_joint is nan', self.log_alphas_V[c][k][chain_length - 1])
 
                 for l in range(chain_length):
-                    # vectorized over t=0..2
+                    # Vectorized over t=0..2
                     log_vec = self.log_alphas_V[c][k][l] + self.log_betas_V[c][k][l] - log_prob_joint
                     if np.any(np.isnan(log_vec)):
                         print('log_prob is nan', l, self.log_alphas_V[c][k][l], self.log_betas_V[c][k][l])
@@ -899,20 +929,6 @@ class HMMModel:
         # Set thetas and make sure they are in (0, 1)
         self.thetas = np.array([np.clip(numerators[t] / denominators[t], 0.001, 0.999) for t in range(self.num_states)])
 
-
-    def update_T(self):
-        """
-        Updates the transition matrix.
-        Args:
-            self:
-        Returns:
-        """
-        for c in range(self.num_chr):
-            # Compute entries for each state pair
-            for t1 in range(self.num_states):
-                for t2 in range(self.num_states):
-                    return
-
     def get_model_prob(self):
         """
         Approximates the log probability of the model using alphas
@@ -924,14 +940,6 @@ class HMMModel:
             for k in range(self.num_clusters):
                 cur_v_val = self.V[c][k][self.chain_lengths[c] - 1]
                 log_joint += self.log_alphas_V[c][k][self.chain_lengths[c] - 1][cur_v_val]
-
-        # for i in range(self.num_cells):
-        #     k = self.Z[i]
-        #
-        #     for c in range(self.num_chr):
-        #         for l in range(self.chain_lengths[c]):
-        #             state = self.V[c][k][l]
-        #             log_joint += binom_logpmf(self.A[c][i][l], self.D[c][i][l], self.thetas[state])
 
         return log_joint
 
@@ -951,7 +959,7 @@ class HMMModel:
         for _ in tqdm(range(num_inits), disable=True):
             print(f'Initialization iteration {_}')
 
-            # If we already set Z, that is intentional and we don't want to change it
+            # If we already set Z, that is intentional, and we don't want to change it
             if self.Z_init is None:
                 self.Z = np.random.choice(self.num_clusters,
                                           size=self.num_cells,
@@ -992,27 +1000,3 @@ class HMMModel:
 
         self.model_prob = model_prob
         self.close_pool()
-
-    def _nan_finder_(self, mat, shape):
-        """
-        Searches the given matrix for any nan values.
-        """
-        # Make a flat coordinate grid for traversing the matrix
-        total_entries = np.prod(shape)
-        dims = len(shape)
-        coordinate_arr = np.zeros(shape=(total_entries, dims), dtype=int)
-        
-        # Generate coordinates for each element in the matrix
-        for i in range(total_entries):
-            index = i
-            for j, dim in enumerate(reversed(shape)):
-                coordinate_arr[i][dims - 1 - j] = index % dim
-                index //= dim
-
-        # Now traverse the coordinate list and return any coordinates with a nan
-        nan_coords = []
-        for coords in coordinate_arr:
-            if np.isnan(mat[tuple(coords)]):
-                nan_coords.append(coords)
-
-        return nan_coords
