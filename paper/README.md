@@ -98,7 +98,7 @@ python downsampling_fig.py
 
 ### PBMC Dataset
 Running the pre-processing should have downloaded demuxlet's results from their paper, as well as an anndata of our
-cellSNP-lite variant calls (`--minMAF 0.1 --minCOUNT 20`). The benchmark can be run with:
+cellSNP-lite variant calls (`--minMAF 0.1 --minCOUNT 20`). The PBMC pre-processing folder has a rough layout of the scripts used for this pipeline. After, the benchmark can be run with:
 
 ```bash
 python PBMC_HMM.py
