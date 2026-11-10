@@ -1,12 +1,21 @@
-from numba import njit, cuda, float32, int32
+from numba import njit, cuda
 from math import lgamma
 
-import scipy
+from scipy.special import gammaln
+from scipy.special import logsumexp
+from scipy.sparse import csr_matrix
+from scipy.stats import beta as beta_dist
+
 import numpy as np
 from tqdm import tqdm
-from multiprocessing import Pool
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import math
+from . import demuxHMM_utils as utils
+
+# Gpu math constant for doublet detection
+MAX_K = 250
+MAX_CLUSTER_PAIRS = (MAX_K * (MAX_K - 1)) // 2
 
 @njit
 def xlogy(x, y):
@@ -51,6 +60,69 @@ def binom_logpmf(k=1, n=1, p=0.5):
     r = combiln + xlogy(k, p) + xlog1py(n - k, -p)
     return r
 
+@njit
+def make_lgamma_lookup(max_depth):
+    # Creates a lookup table for lgamma up to max_depth + 1
+    table = np.empty((max_depth + 2), dtype=np.float32)
+
+    for i in range(1, max_depth + 2):
+        table[i] = lgamma(i)
+
+    return table
+
+@cuda.jit(device=True)
+def _lse3(a0, a1, a2):
+    """
+    Stabilized log-sum-exp for three floats.
+    Args:
+        a0: float
+        a1: float
+        a2: float
+    Returns: LSE([a0, a1, a2])
+    """
+    m = max(a0, a1) if max(a0, a1) > a2 else a2
+    return math.log(math.exp(a0 - m) + math.exp(a1 - m) + math.exp(a2 - m)) + m
+
+@cuda.jit(device=True)
+def _lse(lse_terms, num_pairs):
+    m = lse_terms[0]
+    for i in range(1, num_pairs):
+        if lse_terms[i] > m:
+            m = lse_terms[i]
+
+    s = 0.0
+    for i in range(num_pairs):
+        s += math.exp(lse_terms[i] - m)
+
+    return  m + math.log(s)
+
+@njit
+def betaln(a, b):
+    return np.log(math.gamma(a)) + np.log(math.gamma(b)) - np.log(math.gamma(a + b))
+
+@njit
+def beta_logpdf(x, a, b):
+    lPx = xlog1py(b - 1.0, -x) + xlogy(a - 1.0, x)
+    lPx -= betaln(a, b)
+    return lPx
+
+@njit
+def _logsumexp(a):
+    a_max = a.max()
+    b = a[a != a_max] - a_max
+    m = len(a) - len(b)
+    return np.log1p(np.exp(b).sum()/m) + np.log(m) + a_max
+
+def stable_softmax(log_probs):
+    a_max = np.max(log_probs)
+    exp_vals = np.exp(log_probs - a_max)
+    sum_exp = np.sum(exp_vals)
+
+    if sum_exp == 0 or np.isnan(sum_exp):
+        # fallback to uniform
+        return np.ones_like(log_probs) / len(log_probs)
+    return exp_vals / sum_exp
+
 @cuda.jit(device=True)
 def xlogy_gpu(x, y):
     """
@@ -74,85 +146,36 @@ def xlog1py_gpu(x, y):
     return 0.0 if x == 0 else x * math.log1p(y)
 
 @cuda.jit(device=True)
-def binom_logpmf_gpu(k, n, p):
+def binom_logpmf_gpu(k, n, log_p, log_1p, lgamma_lookup):
     """
     The log pmf function for the binomial distribution. Compatible with gpu.
     Args:
         k: Number of successes.
         n: Total number of draws.
-        p: Probability of success.
+        log_p: log probability of success.
+        log_1p: log 1 - probability of success.
+        lgamma_lookup: A lookup table for the lgamma function
 
     Returns: The binomial log-pmf.
     """
-    p = min(max(p, 1e-6), 1 - 1e-6)  # clamp probability away from 0 or 1
-    combiln = lgamma(n + 1) - (lgamma(k + 1) + lgamma(n - k + 1))
-    return combiln + xlogy_gpu(k, p) + xlog1py_gpu(n - k, -p)
+    log_pmf = lgamma_lookup[n + 1] - lgamma_lookup[k + 1] - lgamma_lookup[n - k + 1]
+    log_pmf += k * log_p
+    log_pmf += (n - k) * log_1p
 
-@cuda.jit(device=True)
-def _lse3(a0, a1, a2):
-    """
-    Stabilized log-sum-exp for three floats.
-    Args:
-        a0: float
-        a1: float
-        a2: float
-    Returns: LSE([a0, a1, a2])
-    """
-    m = max(a0, a1) if max(a0, a1) > a2 else a2
-    return math.log(math.exp(a0 - m) + math.exp(a1 - m) + math.exp(a2 - m)) + m
-
-@njit
-def betaln(a, b):
-    return np.log(math.gamma(a)) + np.log(math.gamma(b)) - np.log(math.gamma(a + b))
-
-@njit
-def beta_logpdf(x, a, b):
-    lPx = xlog1py(b - 1.0, -x) + xlogy(a - 1.0, x)
-    lPx -= betaln(a, b)
-    return lPx
-
-@njit
-def _logsumexp(a):
-    a_max = a.max()
-    b = a[a != a_max] - a_max
-    m = len(a) - len(b)
-    return np.log1p(np.exp(b).sum()/m) + np.log(m) + a_max
-
-@njit
-def numb_cell_z_prob(k, num_cells, num_chr, chain_lengths, A, V, D, thetas, kappas):
-    log_probs_col = np.zeros(num_cells)
-
-    for i in range(num_cells):
-        for c in range(num_chr):
-            for j in range(chain_lengths[c]):
-                genotype = V[c][k][j]
-                log_probs_col[i] += binom_logpmf(A[c][i][j], D[c][i][j], thetas[genotype])
-
-    log_probs_col += np.log(kappas[k])
-
-    return log_probs_col
-
-def stable_softmax(log_probs):
-    a_max = np.max(log_probs)
-    exp_vals = np.exp(log_probs - a_max)
-    sum_exp = np.sum(exp_vals)
-
-    if sum_exp == 0 or np.isnan(sum_exp):
-        # fallback to uniform
-        return np.ones_like(log_probs) / len(log_probs)
-    return exp_vals / sum_exp
-
+    return log_pmf
 
 @cuda.jit
-def z_probs_kernel(A, D, V, thetas, kappas, chain_lens, num_chr, log_probs):
+def z_probs_kernel(positions, A_values, D_values, cell_offsets, V,
+                   log_theta, log1_theta, log_kappas, num_chr,
+                   log_probs, lgamma_lookup):
     """
-    Each thread computes the log-probability for a single (cell, cluster) pair across all chromosomes.
-    A, D: [num_chr, num_cells, max_len]
-    V:    [num_chr, num_clusters, max_len]
-    thetas: (3,)
-    kappas: (num_clusters,)
-    chain_lens: (num_chr,)
-    log_probs: [num_cells, num_clusters] (output)
+    Each thread computes the log-probability for one (cell, cluster) pair.
+
+    positions[p]: Variant index for observation p
+    A_values[p]: Alternate allele count
+    D_values[p]: Total depth
+    cell_offsets[c, i]: cell_offsets[c, i+1]: absolute observation range for cell i on chromosome c
+    V: [num_chr, num_clusters, max_len]
     """
     cell_idx, cluster_idx = cuda.grid(2)
     num_cells, num_clusters = log_probs.shape
@@ -163,323 +186,249 @@ def z_probs_kernel(A, D, V, thetas, kappas, chain_lens, num_chr, log_probs):
     log_prob = 0.0
 
     for c in range(num_chr):
-        chain_len = chain_lens[c]
+        start = cell_offsets[c, cell_idx]
+        end = cell_offsets[c, cell_idx + 1]
 
-        for j in range(chain_len):
+        for p in range(start, end):
+            j = positions[p]
+            a = A_values[p]
+            d = D_values[p]
             genotype = V[c, cluster_idx, j]
-            a = A[c, cell_idx, j]
-            d = D[c, cell_idx, j]
-            if d > 0:
-                log_prob += binom_logpmf_gpu(a, d, thetas[genotype])
 
-    log_prob += math.log(kappas[cluster_idx])
+            log_prob += binom_logpmf_gpu(a, d, log_theta[genotype], log1_theta[genotype], lgamma_lookup)
+
+    log_prob += log_kappas[cluster_idx]
     log_probs[cell_idx, cluster_idx] = log_prob
 
-def get_z_probs_gpu(num_cells, num_clusters, num_chr, chain_lengths, A, D, V, thetas, kappas):
+def get_z_probs_gpu(num_cells, num_clusters, num_chr, chain_lengths,
+                    positions, A_values, D_values, cell_offsets,
+                    V, thetas, kappas, lgamma_lookup):
+    # Pad chains so we can transfer to GPU
     max_len = max(chain_lengths)
-
-    A_pad = np.zeros((num_chr, num_cells, max_len), dtype=np.int32)
-    D_pad = np.zeros((num_chr, num_cells, max_len), dtype=np.int32)
-    V_pad = np.zeros((num_chr, num_clusters, max_len), dtype=np.int32)
+    V_pad = np.zeros((num_chr, num_clusters, max_len), dtype=np.uint8)
 
     for c in range(num_chr):
-        A_pad[c, :, :chain_lengths[c]] = A[c]
-        D_pad[c, :, :chain_lengths[c]] = D[c]
         V_pad[c, :, :chain_lengths[c]] = V[c]
 
-    # Transfer to device
-    A_d = cuda.to_device(A_pad)
-    D_d = cuda.to_device(D_pad)
+    # Precompute log kappas since we use it for each z_i
+    log_kappas = np.log(kappas, dtype=np.float32)
+
+    # Clamp thetas to a safe range (in case of numerical errors)
+    thetas_clipped = np.clip(thetas, a_min=1e-6, a_max=1 - 1e-6)
+
+    # Pre-compute common logs of theta
+    log_theta = np.log(thetas_clipped, dtype=np.float32)
+    log1_theta = np.log(1.0 - thetas_clipped, dtype=np.float32)
+
+    # Transfer sparse observations
+    positions_d = cuda.to_device(positions.astype(np.uint32, copy=False))
+    A_values_d = cuda.to_device(A_values.astype(np.uint16, copy=False))
+    D_values_d = cuda.to_device(D_values.astype(np.uint16, copy=False))
+    cell_offsets_d = cuda.to_device(cell_offsets.astype(np.uint64, copy=False))
+
+    # Transfer model data
     V_d = cuda.to_device(V_pad)
-    thetas_d = cuda.to_device(thetas.astype(np.float32))
-    kappas_d = cuda.to_device(kappas.astype(np.float32))
-    chain_lens_d = cuda.to_device(np.array(chain_lengths, dtype=np.int32))
+    log_theta_d = cuda.to_device(log_theta)
+    log1_theta_d = cuda.to_device(log1_theta)
+    log_kappas_d = cuda.to_device(log_kappas)
+    lgamma_lookup_d = cuda.to_device(lgamma_lookup.astype(np.float32, copy=False))
 
     log_probs_d = cuda.device_array((num_cells, num_clusters), dtype=np.float32)
 
     threadsperblock = (16, 16)  # 256 threads/block
-    blockspergrid = (
-        (num_cells + threadsperblock[0] - 1) // threadsperblock[0],
-        (num_clusters + threadsperblock[1] - 1) // threadsperblock[1]
-    )
+    blockspergrid = ((num_cells + threadsperblock[0] - 1) // threadsperblock[0],
+                     (num_clusters + threadsperblock[1] - 1) // threadsperblock[1])
 
-    z_probs_kernel[blockspergrid, threadsperblock](
-        A_d, D_d, V_d, thetas_d, kappas_d, chain_lens_d, num_chr, log_probs_d
-    )
+    z_probs_kernel[blockspergrid, threadsperblock](positions_d, A_values_d, D_values_d, cell_offsets_d, V_d,
+                                                   log_theta_d, log1_theta_d, log_kappas_d, num_chr,
+                                                   log_probs_d, lgamma_lookup_d)
 
     # Copy back and normalize on CPU
     log_probs = log_probs_d.copy_to_host()
-    probs = np.zeros_like(log_probs)
+    probs = np.empty_like(log_probs)
+
     for i in range(num_cells):
         probs[i] = stable_softmax(log_probs[i])
 
     return probs
 
-def normalize_rows(mat):
+def precompute_cluster_log_likelihoods_chr(c, ZT, A_sparse_c, D_sparse_c,
+                                           logcomb_sparse_c, chain_lengths, log_theta,
+                                           log1_theta, num_states, num_clusters):
     """
-    Normalizes a matrix containing log probabilities (unnormalized) and bring it into normal space.
-    Args:
-        mat: A matrix of unnomormalized log probabilities.
+    Precompute sum(log_binom_pmf) for all (cluster, pos, state) in a chromosome.
 
-    Returns: normed_mat
+    :param c: The current chromosome.
+    :param ZT: (num_cells, num_clusters) where Z_onehot[i][k] == 1 if the cluster of cell i is k
+    :param A_sparse_c: A csr matrix of alternate allele counts for chromosome c.
+    :param D_sparse_c: A csr matrix of depth counts for chromosome c.
+    :param logcomb_sparse_c: Precomputed values for D[c][i][j] choose A[c][i][j]. Stored as csr.
+    :param chain_lengths: A list containing number of SNPs by chromosome.
+    :param log_theta: log(emission probabilities)
+    :param log1_theta: log( 1 - emission probabilities)
+    :param num_states: Number of states (always 3).
+    :param num_clusters: Number of clusters.
+    :return: c, log_likelihoods_c
     """
-    normed_mat = mat.copy()
+    L = chain_lengths[c]
+    log_likelihoods_c = np.empty((num_clusters, L, num_states), dtype=np.float32)
 
-    for i in range(mat.shape[0]):
-        # Normalize probabilities in log space (log sum exp trick)
-        # https://gregorygundersen.com/blog/2020/02/09/log-sum-exp/
-        lse_row = _logsumexp(mat[i]) # ! If there is instability, look here first!!!
+    # Sum of all observations over cells. Shape (num_clusters, L)
+    sum_A = (ZT @ A_sparse_c).toarray()
+    sum_D = (ZT @ D_sparse_c).toarray()
+    sum_logcomb = (ZT @ logcomb_sparse_c).toarray()
 
-        probs_row = np.zeros(mat.shape[1])
-        for k in range(mat.shape[1]):
-            probs_row[k] = np.exp(mat[i, k] - lse_row)
+    for t in range(num_states):
+        log_likelihoods_c[:, :, t] = sum_logcomb + sum_A * log_theta[t] + (sum_D - sum_A) * log1_theta[t]
 
-        normed_mat[i] = probs_row
+    return c, log_likelihoods_c
 
-    return normed_mat
+def precompute_cluster_log_likelihoods(A_sparse, D_sparse, Z,
+                                       logcomb_sparse,thetas,
+                                       num_chr, num_clusters,
+                                       chain_lengths, num_states=3, threads=8):
+    """
+    Precomputes log(binompdf) for each cluster.
 
-def get_cell_z_prob(args):
-    k, num_cells, num_chr, chain_lengths, A, V, D, thetas, kappas = args
-    return numb_cell_z_prob(k, num_cells, num_chr, chain_lengths, A, V, D, thetas, kappas)
-
-@njit
-def numb_get_forward_prob(c, k, Z, chain_lengths, alphas, betas, kappas, pi, A_c, D_c, thetas, T_c):
-    # Get the indices of cells in cluster k
-    cluster_inds = np.where(Z == k)[0]
-
-    log_alpha_V_ck = np.zeros(shape=(chain_lengths[c], 3))
-
-    # Set the initial conditions for each possible genotype
-    for t in range(3):
-        # Work in log space
-        log_alpha_t = 0
-
-        # Add the contribution from the data and clustering
-        for i in cluster_inds:
-            logpmf = binom_logpmf(A_c[i][0], D_c[i][0], thetas[t])
-            if np.isnan(logpmf) or np.isinf(logpmf):
-                print('logpmf isnan', A_c[i][0], D_c[i][0], thetas[t])
-
-            log_alpha_t += logpmf
-            log_alpha_t += np.log(kappas[k])
-
-        # Add the contribution from theta
-        theta_cont = beta_logpdf(thetas[t], alphas[t], betas[t])
-        if np.isnan(theta_cont) or np.isinf(theta_cont):
-            print('theta cont nan', thetas[t], alphas[t], betas[t])
-
-        log_alpha_t += theta_cont
-
-        # Add the prior on v_c,k,0
-        log_alpha_t += np.log(pi[t])
-        log_alpha_V_ck[0][t] = log_alpha_t
-
-    for l in range(1, chain_lengths[c]):
-        for t in range(3):
-            # We will do a sum over the values of alpha from the previous step using the lse trick
-            lse_terms = np.zeros(3)
-
-            # Precompute the data contribution term
-            data_term = 0
-            for i in cluster_inds:
-                pmf = binom_logpmf(A_c[i][l], D_c[i][l], thetas[t])
-                data_term += pmf
-
-            lse_terms += data_term
-
-            for t_prev in range(3):
-                lse_terms[t_prev] += log_alpha_V_ck[l-1][t_prev]  # Previous alpha contribution
-                lse_terms[t_prev] += np.log(T_c[t_prev, t])  # Transition probability
-
-            if np.any(np.isinf(lse_terms)):
-                print(data_term, log_alpha_V_ck[l-1][t_prev], l)
-                raise ValueError('inf')
-
-            lse = _logsumexp(lse_terms)
-            # if np.isnan(lse) or np.isinf(lse):
-            #     print('lse is nan', lse_terms)
-            log_alpha_V_ck[l][t] = lse
-
-            if np.isinf(log_alpha_V_ck[l][t]) or np.isnan(log_alpha_V_ck[l][t]):
-                print(data_term, log_alpha_V_ck[l-1], l)
-                raise ValueError('inf or nan')
-
-    return log_alpha_V_ck
-
-@njit
-def numb_get_backward_prob(c, k, Z, chain_lengths, A_c, D_c, thetas, T_c):
-    # Get the indices of cells in cluster k
-    cluster_inds = np.where(Z == k)[0]
-
-    # We do not need to do any initialization because beta(c, k, n-1, :) = 1 and log(1) = 0
-    log_beta_V_ck = np.zeros(shape=(chain_lengths[c], 3))
-
-    for l in range(chain_lengths[c] - 2, -1, -1):
-        for t in range(3):
-            lse_terms = np.zeros(3)
-
-            for t_next in range(3):
-                # Add data term contribution
-                for i in cluster_inds:
-                    lse_terms[t_next] += binom_logpmf(A_c[i][l + 1], D_c[i][l + 1], thetas[t_next])
-
-                # Add the higher indexed Beta term contribution
-                lse_terms[t_next] += log_beta_V_ck[l + 1][t_next]
-
-                # Add the transition probability
-                lse_terms[t_next] += np.log(T_c[t_next, t])
-
-            log_beta_V_ck[l][t] = _logsumexp(lse_terms)
-
-            if np.isinf(log_beta_V_ck[l][t]) or np.isnan(log_beta_V_ck[l][t]):
-                print(lse_terms, log_beta_V_ck[l][t], l, 'beta')
-                raise ValueError('inf or nan')
-
-    return log_beta_V_ck
-
-@njit
-def precompute_cluster_log_likelihoods(A, D, Z, thetas, num_chr, num_clusters, chain_lengths, num_states=3):
-    """Precompute ∑ log_binom_pmf for all (chr, cluster, pos, state)."""
-    max_len = max(chain_lengths)
+    :param A_sparse: A list of csr matrices of alternate allele counts by chromosome.
+    :param D_sparse: A list of csr matrices of depth counts by chromosome.
+    :param Z: Cluster assignments (Z[i] = k means cell i is in cluster k).
+    :param logcomb_sparse: Precomputed values for D[c][i][j] choose A[c][i][j]. Stored as csr.
+    :param thetas: The current emission probabilities.
+    :param num_chr: Number of chromosomes.
+    :param num_clusters: The number of clusters.
+    :param chain_lengths: The number of snps on each chromosome (indexed by c).
+    :param num_states: The number of states (always 3).
+    :param threads: The number of threads to use.
+    :return: log_likelihoods
+    """
+    max_len = np.max(chain_lengths)
     log_likelihoods = np.zeros((num_chr, num_clusters, max_len, num_states), dtype=np.float32)
 
-    for c in range(num_chr):
-        L = chain_lengths[c]
-        for k in range(num_clusters):
-            cell_inds = np.where(Z == k)[0]
-            for l in range(L):
-                for t in range(num_states):
-                    p = thetas[t]
-                    total = 0.0
-                    for i in cell_inds:
-                        d = D[c][i][l]
-                        a = A[c][i][l]
-                        if d > 0:
-                            total += binom_logpmf(a, d, p)
-                    log_likelihoods[c, k, l, t] = total
+    # Make a one-hot matrix identifying the clustering
+    # (num_cells, num_clusters) where Z_onehot[i][k] == 1 if the cluster of cell i is k
+    num_cells = len(Z)
+    Z_onehot = csr_matrix((np.ones(num_cells, dtype=np.float32), (np.arange(num_cells), Z)),
+                          shape=(num_cells, num_clusters))
+    ZT = Z_onehot.T
+
+    # We will use log thetas throughout the log binompmf, so pre-compute once
+    log_theta = np.log(thetas)
+    log1_theta = np.log1p(-thetas)
+
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = [executor.submit(precompute_cluster_log_likelihoods_chr,c, ZT, A_sparse[c], D_sparse[c],
+                            logcomb_sparse[c], chain_lengths, log_theta, log1_theta,
+                            num_states, num_clusters) for c in range(num_chr)]
+
+        for future in as_completed(futures):
+            c, result = future.result()
+            L = chain_lengths[c]
+            log_likelihoods[c, :, :L, :] = result
 
     return log_likelihoods
 
 @cuda.jit
-def forward_backward_likelihood_kernel(log_likelihoods, thetas, T, pi, kappas,
-                                       alphas, betas,
+def forward_backward_likelihood_kernel(log_likelihoods, beta_ln_prior, log_T, log_pi, log_kappas,
                                        chain_lengths, log_alphas, log_betas,
-                                       num_chr, num_clusters, num_states, max_len):
+                                         num_chr, num_clusters):
 
     c_idx, k_idx = cuda.grid(2)
     if c_idx >= num_chr or k_idx >= num_clusters:
         return
 
+    # Basic constants
     L = chain_lengths[c_idx]
-    # TODO: The first dimension should be the max chain length
-    log_alpha = cuda.local.array((4500, 3), dtype=float32)
-    log_beta = cuda.local.array((4500, 3), dtype=float32)
+    NUM_STATES = 3
+
+    vals = cuda.local.array(3, dtype=np.float32)
+
+    # Add priors
+    for t in range(NUM_STATES):
+        log_alphas[c_idx, k_idx, 0, t] = (log_likelihoods[c_idx, k_idx, 0, t] +
+                                          log_kappas[k_idx] + log_pi[t] + beta_ln_prior[t])
 
     # Forward pass
-    for t in range(num_states):
-        # Theta prior (rough beta_logpdf)
-        prior = xlog1py_gpu(betas[t] - 1.0, -thetas[t]) + xlogy_gpu(alphas[t] - 1.0, thetas[t])
-        prior -= xlogy_gpu(alphas[t], 1.0) + xlogy_gpu(betas[t], 1.0) - xlogy_gpu(alphas[t] + betas[t], 1.0)
-
-        log_alpha[0][t] = log_likelihoods[c_idx, k_idx, 0, t] + math.log(kappas[k_idx]) + math.log(pi[t]) + prior
-
     for l in range(1, L):
-        for t in range(num_states):
-            vals = cuda.local.array(3, dtype=float32)
-            for t_prev in range(num_states):
-                vals[t_prev] = log_alpha[l - 1][t_prev] + math.log(T[c_idx, t_prev, t])
+        for t in range(NUM_STATES):
+            for t_prev in range(NUM_STATES):
+                vals[t_prev] = log_alphas[c_idx, k_idx, l - 1, t_prev] + log_T[c_idx, t_prev, t]
             max_val = max(vals[0], max(vals[1], vals[2]))
             lse = math.log(math.exp(vals[0] - max_val) +
                            math.exp(vals[1] - max_val) +
                            math.exp(vals[2] - max_val)) + max_val
-            log_alpha[l][t] = log_likelihoods[c_idx, k_idx, l, t] + lse
+            log_alphas[c_idx, k_idx, l, t] = log_likelihoods[c_idx, k_idx, l, t] + lse
 
     # Backward pass
-    for t in range(num_states):
-        log_beta[L - 1][t] = 0.0
+    for t in range(NUM_STATES):
+        # Re-initialize
+        log_betas[c_idx, k_idx, L - 1, t] = 0.0
 
     for l in range(L - 2, -1, -1):
-        for t in range(num_states):
-            vals = cuda.local.array(3, dtype=float32)
-            for t_next in range(num_states):
+        for t in range(NUM_STATES):
+            for t_next in range(NUM_STATES):
                 vals[t_next] = (
                     log_likelihoods[c_idx, k_idx, l + 1, t_next] +
-                    log_beta[l + 1][t_next] +
-                    math.log(T[c_idx, t_next, t])
+                    log_betas[c_idx, k_idx, l + 1, t_next] +
+                    log_T[c_idx, t, t_next]
                 )
             max_val = max(vals[0], max(vals[1], vals[2]))
             lse = math.log(math.exp(vals[0] - max_val) +
                            math.exp(vals[1] - max_val) +
                            math.exp(vals[2] - max_val)) + max_val
-            log_beta[l][t] = lse
+            log_betas[c_idx, k_idx, l, t] = lse
 
-    # Write to global memory
-    for l in range(L):
-        for t in range(num_states):
-            log_alphas[c_idx, k_idx, l, t] = log_alpha[l][t]
-            log_betas[c_idx, k_idx, l, t] = log_beta[l][t]
+@njit
+def compute_betaln_prior(thetas, alphas, betas):
+    """
+    Computes the betaln pdf function.
 
+    :param thetas: Emission probabilities.
+    :param alphas: The alpha priors for each emission probability.
+    :param betas: The beta priors for each emission probability.
+    :return: betaln_pdf (len(3) np.array)
+    """
+    prior = np.zeros_like(thetas)
 
-def get_forward_backward(args):
-    c, k, Z, chain_lengths, alphas, betas, kappas, pi, A_c, D_c, thetas, T_c = args
+    for t in range(thetas.shape[0]):
+        prior[t] += (alphas[t] - 1) * math.log(thetas[t]) + (betas[t] - 1) * math.log1p(-thetas[t])
+        prior[t] -= lgamma(alphas[t]) + lgamma(betas[t]) - lgamma(alphas[t] + betas[t])
 
-    log_alpha = numb_get_forward_prob(c, k, Z, chain_lengths, alphas, betas, kappas, pi, A_c, D_c, thetas, T_c)
-    log_beta = numb_get_backward_prob(c, k, Z, chain_lengths, A_c, D_c, thetas, T_c)
-
-    return c, k, log_alpha, log_beta
+    return prior
 
 def forward_backward_gpu_optimized(log_likelihoods, thetas, T, pi, kappas, alphas, betas,
                                    chain_lengths, num_chr, num_clusters, max_len):
     num_states = 3
 
+    # Precompute commonly used logs
+    log_T = np.log(T, dtype=np.float32)
+    log_pi = np.log(pi, dtype=np.float32)
+    log_kappas = np.log(kappas, dtype=np.float32)
+    beta_ln_prior = compute_betaln_prior(thetas, alphas, betas)
+
     # Move everything to device
-    thetas_d = cuda.to_device(thetas.astype(np.float32))
-    T_d = cuda.to_device(T.astype(np.float32))
-    pi_d = cuda.to_device(pi.astype(np.float32))
-    kappas_d = cuda.to_device(kappas.astype(np.float32))
-    alphas_d = cuda.to_device(alphas.astype(np.float32))
-    betas_d = cuda.to_device(betas.astype(np.float32))
+    log_T_d = cuda.to_device(log_T)
+    log_pi_d = cuda.to_device(log_pi)
+    log_kappas_d = cuda.to_device(log_kappas)
     lens_d = cuda.to_device(np.array(chain_lengths, dtype=np.int32))
+    beta_ln_prior_d = cuda.to_device(beta_ln_prior)
 
     log_likelihoods_d = cuda.to_device(log_likelihoods)
     log_alphas_d = cuda.device_array((num_chr, num_clusters, max_len, num_states), dtype=np.float32)
     log_betas_d = cuda.device_array_like(log_alphas_d)
 
-    threadsperblock = (8, 8)
+    threadsperblock = (16, 16)
     blockspergrid = (
         (num_chr + threadsperblock[0] - 1) // threadsperblock[0],
         (num_clusters + threadsperblock[1] - 1) // threadsperblock[1]
     )
 
     forward_backward_likelihood_kernel[blockspergrid, threadsperblock](
-        log_likelihoods_d, thetas_d, T_d, pi_d, kappas_d,
-        alphas_d, betas_d,
+        log_likelihoods_d, beta_ln_prior_d, log_T_d, log_pi_d, log_kappas_d,
         lens_d, log_alphas_d, log_betas_d,
-        num_chr, num_clusters, num_states, max_len
-    )
+        num_chr, num_clusters)
 
     return log_alphas_d.copy_to_host(), log_betas_d.copy_to_host()
-
-@njit
-def numb_get_thetas(t, k, num_states, num_chr, num_cells, chain_lengths, z_probs, probs_V, A, D):
-    numerators = np.zeros(num_states)
-    denominators = np.zeros(num_states)
-
-    # Add the data contributions
-    for i in range(num_cells):
-        for c in range(num_chr):
-            for j in range(chain_lengths[c]):
-                if A[c][i][j] != 0:
-                    numerators[t] += z_probs[i][k] * probs_V[c][k][j][t] * A[c][i][j]
-                if D[c][i][j] != 0:
-                    denominators[t] += z_probs[i][k] * probs_V[c][k][j][t] * D[c][i][j]
-
-    return [numerators, denominators]
-
-def get_thetas(args):
-    t, k, num_states, num_chr, num_cells, chain_lengths, z_probs, probs_V, A, D = args
-    return numb_get_thetas(t, k, num_states, num_chr, num_cells, chain_lengths, z_probs, probs_V, A, D)
-
 
 @cuda.jit
 def chain_probs_kernel(log_alphas, log_betas, chain_lens, out_probs,
@@ -523,56 +472,396 @@ def chain_probs_kernel(log_alphas, log_betas, chain_lens, out_probs,
         out_probs[c, k, l, 1] = s1 * invs
         out_probs[c, k, l, 2] = s2 * invs
 
-def get_double_indicator(args):
+def pack_logs_to_padded(num_chr, K, chain_lengths,
+                         log_alphas_V, log_betas_V):
     """
-    Computes the double indicator needed to update the transition matrix.
+    Pads values of log-alpha and log-betas into GPU-friendly arrays
     Args:
-        args:
-
-    Returns: log-prob of the double indicator given the data
+        num_chr: The number of chromosomes
+        K: The number of clusters
+        chain_lengths: An array of lengths of the chains
+        log_alphas_V: log_alphas as produced by the forward step
+        log_betas_V: log_betas as produced by the backward step
+    Returns: la, lb (padded versions of log_alphas and log_betas)
     """
-    (k, c, l, v_c_k_prev, v_c_k_cur, chain_lengths,
-     log_alphas_c, log_betas_c, A_c, D_c, z, kappas, thetas, theta_alphas, theta_betas, T_c) = args
+    S = 3 # The number of states
+    max_len = max(chain_lengths)
 
-    log_probs = np.zeros(chain_lengths[c] - 1) # Record the transition probabilities for all pairs in the chain
-    cluster_inds = np.where(z == k)[0]
-    num_cells = len(cluster_inds)
+    la_pad = np.zeros((num_chr, K, max_len, S), dtype=np.float32)
+    lb_pad = np.zeros_like(la_pad)
 
-    for l in range(1, chain_lengths[c]):
-        prob = 0
-        prob += log_alphas_c[k][l-1][v_c_k_prev] # Add the alpha contribution
-        prob += log_betas_c[k][l][v_c_k_cur] # Add the beta contribution
+    for c in range(num_chr):
+        L = chain_lengths[c]
 
-        for i in cluster_inds:
-            prob += binom_logpmf(A_c[i][0], D_c[i][0], thetas[v_c_k_cur]) # Add the data contribution
+        for k in range(K):
+            # each is (L,3)
+            la = log_alphas_V[c][k].astype(np.float32)
+            lb = log_betas_V[c][k].astype(np.float32)
 
-        prob += np.log(T_c[v_c_k_prev, v_c_k_cur]) # Transition contribution
+            la_pad[c, k, :L, :] = la[:L, :]
+            lb_pad[c, k, :L, :] = lb[:L, :]
 
-        # Denominator
-        prob -= num_cells * np.log(kappas[k]) # Cluster contribution
-        prob -= beta_logpdf(thetas[v_c_k_prev],
-                                        theta_alphas[v_c_k_prev], theta_betas[v_c_k_prev]) # Theta prior
-        prob -= _logsumexp(log_alphas_c[k][chain_lengths[c] - 1]) # Probability of the data
-        log_probs[l-1] = prob
+    return la_pad, lb_pad, max_len
+
+def chain_probs_gpu(num_chr, num_clusters,
+                    chain_lengths, log_alphas_V, log_betas_V):
+    """
+    Prepares data for the GPU kernel to get probabilities for each possible state in the chain.
+    Args:
+        num_chr: The number of chromosomes
+        num_clusters: The number of clusters
+        chain_lengths: An array of lengths of the chains
+        log_alphas_V: log_alphas as produced by the forward step
+        log_betas_V: log_betas as produced by the backward step
+    Returns: The probabilities for each state in each chain.
+
+    """
+    # Pack lists into padded tensors for GPU
+    la_pad, lb_pad, max_len = pack_logs_to_padded(num_chr, num_clusters,
+                                                  chain_lengths, log_alphas_V, log_betas_V)
+
+    # Move to device
+    la_d = cuda.to_device(la_pad)
+    lb_d = cuda.to_device(lb_pad)
+    lens_d = cuda.to_device(np.array(chain_lengths, dtype=np.int32))
+    out_d = cuda.device_array_like(la_d)  # same shape
+
+    # Launch config: 3D grid over (c,k,l)
+    threadsperblock = (4, 8, 16)  # tweak as needed
+    blockspergrid = (
+        (num_chr + threadsperblock[0] - 1) // threadsperblock[0],
+        (num_clusters + threadsperblock[1] - 1) // threadsperblock[1],
+        (max_len + threadsperblock[2] - 1) // threadsperblock[2],
+    )
+
+    chain_probs_kernel[blockspergrid, threadsperblock](
+        la_d, lb_d, lens_d, out_d,
+        num_chr, num_clusters, max_len
+    )
+
+    out = out_d.copy_to_host()
+    return out
+
+def normalize_rows(mat):
+    """
+    Normalizes a matrix containing log probabilities (unnormalized) and bring it into normal space.
+    Args:
+        mat: A matrix of unnomormalized log probabilities.
+
+    Returns: normed_mat
+    """
+    normed_mat = mat.copy()
+
+    for i in range(mat.shape[0]):
+        # Normalize probabilities in log space (log sum exp trick)
+        # https://gregorygundersen.com/blog/2020/02/09/log-sum-exp/
+        lse_row = _logsumexp(mat[i]) # ! If there is instability, look here first!!!
+
+        probs_row = np.zeros(mat.shape[1])
+        for k in range(mat.shape[1]):
+            probs_row[k] = np.exp(mat[i, k] - lse_row)
+
+        normed_mat[i] = probs_row
+
+    return normed_mat
+
+def get_theta_chr(z_probs, A_c, D_c, probs_V_c):
+    """
+    A worker function to compute values of theta on a chromosome-by-chromosome basis.
+    :param z_probs: Cluster probabilities
+    :param A_c: Alternate allele counts for chromosome c (csr matrix)
+    :param D_c: Depth counts for chromosome c (csr matrix)
+    :param probs_V_c: The chain probabilities for chromosome c
+    :return:
+    """
+    # (clusters, cells) x (cells, snps) equiv to weighted_A[k][j] = sum_i z[i][k]*A[c][i][j]
+    weighted_A = (A_c.T @ z_probs).T
+    weighted_D = (D_c.T @ z_probs).T
+
+    # For numerators equiv to sum_k sum_j (sum_i z[i][k]*A[c][i][j]) * probs_v[c][k][j]
+    numerators = np.einsum('kj,kjt->t', weighted_A, probs_V_c)
+    denominators = np.einsum('kj,kjt->t', weighted_D, probs_V_c)
+
+    return numerators, denominators
+
+@cuda.jit
+def doublet_probs_kernel(positions, A_values, D_values,
+                         cell_offsets, V, top_clusters, pair_log_weights,
+                         log_thetas, log1_thetas, num_chr,
+                         log_probs, lgamma_lookup, k):
+    """
+    Each thread computes the binomial data log-probability for one cell assuming doublet status.
+    We cycle though the top k candidates for the doublet
+
+    :param positions: Variant index for observation p.
+    :param A_values: Alternate allele count.
+    :param D_values: Total depth.
+    :param cell_offsets: cell_offsets[c, i+1]: absolute observation range for cell i on chromosome c.
+    :param V: [num_chr, num_clusters, max_len].
+    :param top_clusters: The top k cluster indices for each cell.
+    :param pair_log_weights: log of cluster probabilities for each cell.
+    :param log_thetas: log(thetas_grid). thetas_grid is a lookup for paired thetas.
+    :param log1_thetas: log(1 - thetas_grid).
+    :param num_chr: Number of chromosomes.
+    :param log_probs: A cell-wise array to store binomial log-prob output.
+    :param lgamma_lookup: A lookup table for the lgamma function.
+    :param k: How many clusters to consider.
+    """
+    cell_idx = cuda.grid(1)
+    num_cells = log_probs.shape[0]
+    if cell_idx >= num_cells:
+        return
+
+    # Compute the top clusters and their weights
+    num_cluster_pairs = (k * (k - 1)) // 2 # k choose 2
+    lse_terms = cuda.local.array(MAX_CLUSTER_PAIRS, np.float32)
+    i = 0
+
+    for k1 in range(k):
+        for k2 in range(k1):
+            cluster1 = top_clusters[cell_idx, k1]
+            cluster2 = top_clusters[cell_idx, k2]
+
+            # Compute the log prob for one cluster pair
+            log_prob = np.float32(0.0)
+
+            for c in range(num_chr):
+                start = cell_offsets[c, cell_idx]
+                end = cell_offsets[c, cell_idx + 1]
+
+                for p in range(start, end):
+                    j = positions[p]
+                    a = A_values[p]
+                    d = D_values[p]
+                    genotype1 = V[c, cluster1, j]
+                    genotype2 = V[c, cluster2, j]
+
+                    log_prob += binom_logpmf_gpu(a, d, log_thetas[genotype1, genotype2],
+                                                 log1_thetas[genotype1, genotype2], lgamma_lookup)
+
+            # Add prior
+            log_prob += pair_log_weights[cell_idx, i]
+
+            # We will have to sum over all the pairings
+            lse_terms[i] = log_prob
+            i += 1
+
+    log_probs[cell_idx] = _lse(lse_terms, num_cluster_pairs)
+
+def _get_data_prob_doublet(z_probs, positions_flat, A_values_flat, D_values_flat,
+                           cell_offsets_flat, V, thetas, lgamma_lookup, k):
+    """
+    Computes the data likelihood for each cell given the current model and clustering.
+    Assumes the cell is a singlet.
+
+    :param z_probs: The probability of membership for each cell x cluster.
+    :param positions_flat: A flattened array of indices corresponding to SNPs.
+    :param A_values_flat: A flattened array of alt reads.
+    :param D_values_flat:  A flattened array of depths.
+    :param cell_offsets_flat: Cell offsets indexed by (chromosome, cell_idx)
+    :param V: The fitted chains.
+    :param thetas: Current theta values.
+    :param lgamma_lookup: A lookup table for the lgamma function.
+    :param k: The number of top cluster pairings we want to explore.
+    :return data_prob_singlet:
+    """
+    # Define constants
+    num_chr = len(V) # Number of chromosomes
+    num_clusters = V[0].shape[0] # Number of clusters
+    chain_lengths = [V[c].shape[1] for c in range(num_chr)]
+    max_len = max(chain_lengths)
+    num_cells = z_probs.shape[0]
+
+    # Pad chains so we can transfer to GPU
+    V_pad = np.zeros((num_chr, num_clusters, max_len), dtype=np.uint8)
+
+    for c in range(num_chr):
+        V_pad[c, :, :chain_lengths[c]] = V[c]
+
+    # Clamp thetas to a safe range (in case of numerical errors)
+    thetas_clipped = np.clip(thetas, a_min=1e-6, a_max=1 - 1e-6)
+    num_states = len(thetas_clipped)
+
+    # Pre-compute common logs of theta pairings
+    theta_pairs_lookup = np.empty(shape=(num_states, num_states), dtype=np.float32)
+
+    for s1 in range(num_states):
+        for s2 in range(num_states):
+            theta_pairs_lookup[s1, s2] = (thetas_clipped[s1] + thetas_clipped[s2]) / 2
+
+    log_theta = np.log(theta_pairs_lookup, dtype=np.float32)
+    log1_theta = np.log(1.0 - theta_pairs_lookup, dtype=np.float32)
+
+    # Compute top-k clusters for every cell
+    top_clusters = np.argsort(z_probs, axis=1)[:, -k:].astype(np.uint16)
+    top_probs = np.empty((num_cells, k), dtype=np.float32)
+
+    for i in range(num_cells):
+        for j in range(k):
+            cluster = top_clusters[i, j]
+            top_probs[i, j] = z_probs[i, cluster]
+
+    # Compute a normalized cluster weighting
+    num_pairs = k * (k - 1) // 2
+    pair_log_weights = np.empty((num_cells, num_pairs), dtype=np.float32)
+
+    for i in range(num_cells):
+        pair_weights = np.empty(num_pairs, dtype=np.float32)
+
+        p = 0
+        for k1 in range(k):
+            for k2 in range(k1):
+                pair_weights[p] = top_probs[i, k1] * top_probs[i, k2]
+                p += 1
+
+        pair_weights /= pair_weights.sum()
+        pair_log_weights[i] = np.log(np.maximum(pair_weights, 1e-30))
+
+    # Transfer sparse observations
+    positions_d = cuda.to_device(positions_flat.astype(np.uint32, copy=False))
+    A_values_d = cuda.to_device(A_values_flat.astype(np.uint16, copy=False))
+    D_values_d = cuda.to_device(D_values_flat.astype(np.uint16, copy=False))
+    cell_offsets_d = cuda.to_device(cell_offsets_flat.astype(np.uint64, copy=False))
+
+    # Transfer model data
+    V_d = cuda.to_device(V_pad)
+    log_theta_d = cuda.to_device(log_theta)
+    log1_theta_d = cuda.to_device(log1_theta)
+    lgamma_lookup_d = cuda.to_device(lgamma_lookup.astype(np.float32, copy=False))
+    top_clusters_d = cuda.to_device(top_clusters)
+    pair_log_weights_d = cuda.to_device(pair_log_weights)
+    log_probs_d = cuda.device_array(num_cells, dtype=np.float32)
+
+    threadsperblock = 256  # 256 threads/block
+    blockspergrid = (num_cells + threadsperblock - 1) // threadsperblock
+
+    doublet_probs_kernel[blockspergrid, threadsperblock](positions_d, A_values_d, D_values_d,
+                                                         cell_offsets_d, V_d, top_clusters_d, pair_log_weights_d,
+                                                         log_theta_d, log1_theta_d, num_chr,
+                                                         log_probs_d, lgamma_lookup_d, k)
+
+    # Copy back and bring back to normal space on CPU
+    log_probs = log_probs_d.copy_to_host()
+
+    return log_probs
+
+@cuda.jit
+def singlet_probs_kernel(positions, A_values, D_values,
+                         cell_offsets, V, Z,
+                         log_theta, log1_theta, num_chr,
+                         log_probs, lgamma_lookup):
+    """
+    Each thread computes the binomial data log-probability for one (cell) pair.
+
+    :param positions: Variant index for observation p.
+    :param A_values: Alternate allele count.
+    :param D_values: Total depth.
+    :param cell_offsets: cell_offsets[c, i+1]: absolute observation range for cell i on chromosome c.
+    :param V: [num_chr, num_clusters, max_len].
+    :param Z: The current best clustering.
+    :param log_theta: log(thetas).
+    :param log1_theta: log(1 - thetas).
+    :param num_chr: Number of chromosomes.
+    :param log_probs: A cell-wise array to store binomial log-prob output.
+    :param lgamma_lookup: A lookup table for the lgamma function.
+    """
+    cell_idx = cuda.grid(1)
+    num_cells = log_probs.shape[0]
+    if cell_idx >= num_cells:
+        return
+
+    cluster_idx = Z[cell_idx]
+    log_prob = np.float32(0.0)
+
+    for c in range(num_chr):
+        start = cell_offsets[c, cell_idx]
+        end = cell_offsets[c, cell_idx + 1]
+
+        for p in range(start, end):
+            j = positions[p]
+            a = A_values[p]
+            d = D_values[p]
+            genotype = V[c, cluster_idx, j]
+
+            log_prob += binom_logpmf_gpu(a, d, log_theta[genotype], log1_theta[genotype], lgamma_lookup)
+
+    log_probs[cell_idx] = log_prob
+
+def _get_data_prob_singlet(Z, positions_flat, A_values_flat, D_values_flat,
+                           cell_offsets_flat, V, thetas,lgamma_lookup):
+    """
+    Computes the data likelihood for each cell given the current model and clustering.
+    Assumes the cell is a singlet.
+
+    :param Z: A np.array containing a index for each cell corresponding to its cluster.
+    :param positions_flat: A flattened array of indices corresponding to SNPs.
+    :param A_values_flat: A flattened array of alt reads.
+    :param D_values_flat:  A flattened array of depths.
+    :param cell_offsets_flat: Cell offsets indexed by (chromosome, cell_idx)
+    :param V: The fitted chains.
+    :param thetas: Current theta values.
+    :param lgamma_lookup: A lookup table for the lgamma function.
+    :return data_prob_singlet:
+    """
+    # Pad chains so we can transfer to GPU
+    num_chr = len(V) # Number of chromosomes
+    num_clusters = V[0].shape[0] # Number of clusters
+    chain_lengths = [V[c].shape[1] for c in range(num_chr)]
+    max_len = max(chain_lengths)
+    V_pad = np.zeros((num_chr, num_clusters, max_len), dtype=np.uint8)
+
+    for c in range(num_chr):
+        V_pad[c, :, :chain_lengths[c]] = V[c]
+
+    # Clamp thetas to a safe range (in case of numerical errors)
+    thetas_clipped = np.clip(thetas, a_min=1e-6, a_max=1 - 1e-6)
+
+    # Pre-compute common logs of theta
+    log_theta = np.log(thetas_clipped, dtype=np.float32)
+    log1_theta = np.log(1.0 - thetas_clipped, dtype=np.float32)
+
+    # Transfer sparse observations
+    positions_d = cuda.to_device(positions_flat.astype(np.uint32, copy=False))
+    A_values_d = cuda.to_device(A_values_flat.astype(np.uint16, copy=False))
+    D_values_d = cuda.to_device(D_values_flat.astype(np.uint16, copy=False))
+    cell_offsets_d = cuda.to_device(cell_offsets_flat.astype(np.uint64, copy=False))
+
+    # Transfer model data
+    V_d = cuda.to_device(V_pad)
+    log_theta_d = cuda.to_device(log_theta)
+    log1_theta_d = cuda.to_device(log1_theta)
+    lgamma_lookup_d = cuda.to_device(lgamma_lookup.astype(np.float32, copy=False))
+    Z_d = cuda.to_device(Z.astype(np.uint16, copy=False))
+
+    num_cells = len(Z)
+    log_probs_d = cuda.device_array(num_cells, dtype=np.float32)
+
+    threadsperblock = 256  # 256 threads/block
+    blockspergrid = (num_cells + threadsperblock - 1) // threadsperblock
+
+    singlet_probs_kernel[blockspergrid, threadsperblock](positions_d, A_values_d, D_values_d,
+                                                         cell_offsets_d, V_d, Z_d,
+                                                         log_theta_d, log1_theta_d, num_chr,
+                                                         log_probs_d, lgamma_lookup_d)
+
+    # Copy back and bring back to normal space on CPU
+    log_probs = log_probs_d.copy_to_host()
 
     return log_probs
 
 class HMMModel:
     def __init__(self, A, D, num_clusters, expected_transitions=None,
-                 z_init=None, threads=80, T_init=None, theta_init=None, pi_init=None,
+                 z_init=None, threads=80, T_init=None, T_eps=10e-10, theta_init=None, pi_init=None,
                  do_theta_update=False, do_pi_update=True, use_gpu=True):
         """
         Args:
             A: list of alternative allele counts (n_cells x n_snps).
             D: List of total counts depth at each snp (n_cells x n_snps).
-            num_chr: The number of chromosomes being modeled.
             num_clusters: The expected number of clusters.
             expected_transitions: An array of expected transitions per chromosome.
             z_init: An initial clustering.
             threads: The number of threads to use.
         """
-        self.A = A
-        self.D = D
         self.num_cells = A[0].shape[0]
         self.num_chr = len(A)
         self.num_clusters = num_clusters
@@ -584,6 +873,51 @@ class HMMModel:
         self.do_pi_update = do_pi_update
         self.model_prob = None
         self.use_gpu = use_gpu
+        self.z_init = z_init
+
+        # Make a sparse-friendly representation of A and D indexed by chromosomes (c)
+        self.positions = []
+        self.A_values = []
+        self.D_values = []
+        self.cell_offsets = []
+        self.A_sparse = []
+        self.D_sparse = []
+
+        for c in range(self.num_chr):
+            positions, A_values, D_values, offsets, A_c, D_c = utils.prepare_sparse_counts(A[c], D[c])
+            self.positions.append(positions)
+            self.A_values.append(A_values)
+            self.D_values.append(D_values)
+            self.cell_offsets.append(offsets)
+            self.A_sparse.append(A_c)
+            self.D_sparse.append(D_c)
+
+        # Flatten sparse A/D representations across chromosomes for GPU
+        self.obs_chr_offsets = np.zeros(self.num_chr + 1, dtype=np.uint64)
+
+        for c in range(self.num_chr):
+            self.obs_chr_offsets[c + 1] = self.obs_chr_offsets[c] + len(self.positions[c])
+
+        total_obs = int(self.obs_chr_offsets[-1])
+
+        self.positions_flat = np.empty(total_obs, dtype=np.uint32)
+        self.A_values_flat = np.empty(total_obs, dtype=np.uint16)
+        self.D_values_flat = np.empty(total_obs, dtype=np.uint16)
+        self.cell_offsets_flat = np.empty((self.num_chr, self.num_cells + 1), dtype=np.uint64)
+
+        for c in range(self.num_chr):
+            start = int(self.obs_chr_offsets[c])
+            end = int(self.obs_chr_offsets[c + 1])
+
+            self.positions_flat[start:end] = self.positions[c]
+            self.A_values_flat[start:end] = self.A_values[c]
+            self.D_values_flat[start:end] = self.D_values[c]
+
+            # Convert chromosome-local offsets to absolute flattened offsets
+            self.cell_offsets_flat[c] = self.cell_offsets[c] + start
+
+        self.logcomb_sparse = None
+        self.__init_logcomb__() # D choose A values that are pre-computed
 
         # Set hyperparameters for theta based on VireoSNP paper and then initialize theta
         self.alphas = np.array([0.3, 3, 29.7])
@@ -606,6 +940,7 @@ class HMMModel:
             raise ValueError("Either T_init or expected_transitions must be given.")
 
         # Initialize T
+        self.T_eps = T_eps
         if T_init is not None:
             self.T = T_init
         else:
@@ -615,7 +950,7 @@ class HMMModel:
         self.__init_chains__()
 
         # Initialize clustering
-        self.kappas = np.array([1/self.num_clusters for i in range(num_clusters)])
+        self.kappas = np.array([1/self.num_clusters for _ in range(num_clusters)])
 
         if z_init is not None:
             self.Z = z_init
@@ -627,31 +962,50 @@ class HMMModel:
                                       p=self.kappas)
             self.Z_init = None
 
+        # Create a lookup table for the lgamma function up to the maximum seen depth to save time in iterations
+        max_depth = int(np.max([np.max(D[c]) for c in range(self.num_chr)]))
+        self.lgamma_lookup = make_lgamma_lookup(max_depth)
+
+    def __init_logcomb__(self):
+        """
+        Pre-computes the values of D[c][i][j] choose A[c][i][j] in sparse format.
+        :return:
+        """
+        self.logcomb_sparse = []
+
+        for c in range(self.num_chr):
+            # Based on the gamma function definition of D choose A
+            logcomb_c =  gammaln(self.D_values[c].astype(np.float32) + 1) \
+                         - gammaln(self.A_values[c].astype(np.float32) + 1)\
+                         - gammaln(self.D_values[c].astype(np.float32) - self.A_values[c].astype(np.float32) + 1)
+
+            logcomb_c_sparse = csr_matrix((logcomb_c, self.D_sparse[c].indices, self.D_sparse[c].indptr),
+                                         shape=self.D_sparse[c].shape)
+
+            self.logcomb_sparse.append(logcomb_c_sparse)
+
     def __init_T__(self):
         """
         Initializes the global transition matrix based on the data and
         the amount of transitions we expect to see per chromosome.
         """
-        
-        # Find the average number of variants on a chromosome
-        num_vars = [mat.shape[1] for mat in self.A]
-
         T = np.zeros(shape=(self.num_chr, self.num_states, self.num_states))
 
         for c in range(self.num_chr):
-            p = self.expected_transitions[c] / num_vars[c]
-            T[c, :, :] = np.array([[1-p, p, 10**(-10)],
+            p = self.expected_transitions[c] / self.chain_lengths[c]
+            T[c, :, :] = np.array([[1-p, p, 0],
                                   [p/2, 1-p, p/2],
-                                  [10**(-10), p, 1-p]])
+                                  [0, p, 1-p]])
+            T[c, :, :] = (T[c, :, :] + self.T_eps) / (1 + 3*self.T_eps)
         self.T = T
 
     def __init_theta__(self):
         # Sample thetas from the prior
-        self.thetas = np.array([scipy.stats.beta.rvs(alpha, beta) for alpha, beta in zip(self.alphas, self.betas)])
+        self.thetas = np.array([beta_dist.rvs(alpha, beta) for alpha, beta in zip(self.alphas, self.betas)])
 
     def __init_chains__(self):
         # Initialize V as a list of K x n_variants matrices for each chromosome
-        self.V = [np.zeros(shape=(self.num_clusters, self.A[i].shape[1]), dtype=int) for i in range(self.num_chr)]
+        self.V = [np.zeros(shape=(self.num_clusters, self.chain_lengths[c]), dtype=int) for c in range(self.num_chr)]
 
         # Initialize V[c][i][0] from pi and then sample transitions for the chain
         for c in range(self.num_chr):
@@ -664,67 +1018,23 @@ class HMMModel:
                     T_row = self.T[c][self.V[c][i][j-1]]
                     self.V[c][i][j] = int(np.random.choice(3, p=T_row))
 
-    def init_pool(self):
-        self.pool = Pool(self.num_threads)
-
-    def close_pool(self):
-        self.pool.close()
-
-    def get_output(self):
-        model_out = {'z_probs': self.z_probs, 'V': self.V, 'pi': self.pi,
-                     'theta': self.thetas, 'probability': self.model_prob}
-        return model_out
-
-    def update(self):
-        # Update z
-        self.get_z_probs()
-        self.set_z()
-
-        # Update V
-        self.forward_backward_pass()
-        self.get_chain_probabilities()
-        self.set_V()
-
-        if self.do_theta_update:
-            self.update_theta()
-
-        if self.do_pi_update:
-            self.update_pi()
-
-
     def get_z_probs(self):
         """
         Computes z_probs using CPU or GPU.
         """
-        start_time = time.time()
         if self.use_gpu:
             self.z_probs = get_z_probs_gpu(
-                self.num_cells, self.num_clusters, self.num_chr,
-                self.chain_lengths, self.A, self.D, self.V,
-                self.thetas, self.kappas
+                self.num_cells, self.num_clusters, self.num_chr, self.chain_lengths,
+                self.positions_flat, self.A_values_flat, self.D_values_flat, self.cell_offsets_flat,
+                self.V, self.thetas, self.kappas, self.lgamma_lookup
             )
         else:
-            probs = np.zeros((self.num_cells, self.num_clusters))
-            args = [
-                [k, self.num_cells, self.num_chr, self.chain_lengths,
-                 self.A, self.V, self.D, self.thetas, self.kappas]
-                for k in range(self.num_clusters)
-            ]
-            prob_cols = list(tqdm(self.pool.imap(get_cell_z_prob, args), total=self.num_clusters, desc='Z Probs'))
-
-            for k, col in enumerate(prob_cols):
-                probs[:, k] = col
-
-            probs = normalize_rows(probs)
-            self.z_probs = probs
+            raise NotImplementedError("CPU only not currently implemented for z probabilities.")
 
         self.z_probs = np.clip(self.z_probs, 1e-12, 1.0)
 
         for i in range(self.num_cells):
             self.z_probs[i] = self.z_probs[i] / np.sum(self.z_probs[i])  # re-normalize
-
-        end_time = time.time()
-        print(f"get_z_probs completed in {end_time - start_time:.4f} seconds (GPU: {self.use_gpu})")
 
     def set_z(self):
         """
@@ -735,71 +1045,22 @@ class HMMModel:
 
     def forward_backward_pass(self):
         if self.use_gpu:
-            try:
-                log_likelihoods = precompute_cluster_log_likelihoods(
-                    self.A, self.D, self.Z, self.thetas,
-                    self.num_chr, self.num_clusters, self.chain_lengths
-                )
+            log_likelihoods = precompute_cluster_log_likelihoods(
+                self.A_sparse, self.D_sparse, self.Z, self.logcomb_sparse, self.thetas,
+                self.num_chr, self.num_clusters, self.chain_lengths, threads=self.num_threads
+            )
 
-                log_alphas, log_betas = forward_backward_gpu_optimized(
-                    log_likelihoods, self.thetas, self.T, self.pi, self.kappas,
-                    self.alphas, self.betas, self.chain_lengths,
-                    self.num_chr, self.num_clusters, max(self.chain_lengths)
-                )
+            log_alphas, log_betas = forward_backward_gpu_optimized(
+                log_likelihoods, self.thetas, self.T, self.pi, self.kappas,
+                self.alphas, self.betas, self.chain_lengths,
+                self.num_chr, self.num_clusters, max(self.chain_lengths)
+            )
 
-                self.log_alphas_V = [[log_alphas[c, k] for k in range(self.num_clusters)] for c in range(self.num_chr)]
-                self.log_betas_V = [[log_betas[c, k] for k in range(self.num_clusters)] for c in range(self.num_chr)]
+            self.log_alphas_V = [[log_alphas[c, k] for k in range(self.num_clusters)] for c in range(self.num_chr)]
+            self.log_betas_V = [[log_betas[c, k] for k in range(self.num_clusters)] for c in range(self.num_chr)]
+        else:
+            raise NotImplementedError("CPU only not currently implemented for forward-backward pass.")
 
-                return
-            except Exception as e:
-                print(f"[GPU Fallback] Forward-backward GPU failed: {e}. Falling back to CPU.")
-                # Fallback to CPU below
-
-        # CPU fallback
-        log_alphas_V = [[] for _ in range(self.num_chr)]
-        log_betas_V = [[] for _ in range(self.num_chr)]
-        args = []
-        for c in range(self.num_chr):
-            for k in range(self.num_clusters):
-                args.append([c, k, self.Z, self.chain_lengths, self.alphas,
-                             self.betas, self.kappas, self.pi, self.A[c], self.D[c],
-                             self.thetas, self.T[c]])
-
-        results = list(tqdm(self.pool.imap(get_forward_backward, args),
-                            total=len(args), desc='Forward+Backward'))
-
-        for c, k, log_alpha, log_beta in results:
-            log_alphas_V[c].append(log_alpha)
-            log_betas_V[c].append(log_beta)
-
-        self.log_alphas_V = log_alphas_V
-        self.log_betas_V = log_betas_V
-
-    def _pack_logs_to_padded(self):
-        """
-        Packs self.log_alphas_V / self.log_betas_V (lists) into
-        padded arrays [num_chr, num_clusters, max_len, 3] for GPU.
-        """
-        num_chr = self.num_chr
-        K = self.num_clusters
-        S = self.num_states
-        max_len = max(self.chain_lengths)
-
-        la_pad = np.zeros((num_chr, K, max_len, S), dtype=np.float32)
-        lb_pad = np.zeros_like(la_pad)
-
-        for c in range(num_chr):
-            L = self.chain_lengths[c]
-
-            for k in range(K):
-                # each is (L,3)
-                la = self.log_alphas_V[c][k].astype(np.float32)
-                lb = self.log_betas_V[c][k].astype(np.float32)
-
-                la_pad[c, k, :L, :] = la[:L, :]
-                lb_pad[c, k, :L, :] = lb[:L, :]
-
-        return la_pad, lb_pad, max_len
 
     def get_chain_probabilities(self):
         """
@@ -815,29 +1076,8 @@ class HMMModel:
 
         if self.use_gpu:
             try:
-                # Pack lists into padded tensors for GPU
-                la_pad, lb_pad, max_len = self._pack_logs_to_padded()
-
-                # Move to device
-                la_d = cuda.to_device(la_pad)
-                lb_d = cuda.to_device(lb_pad)
-                lens_d = cuda.to_device(np.array(self.chain_lengths, dtype=np.int32))
-                out_d = cuda.device_array_like(la_d)  # same shape
-
-                # Launch config: 3D grid over (c,k,l)
-                threadsperblock = (4, 8, 16)  # tweak as needed
-                blockspergrid = (
-                    (self.num_chr + threadsperblock[0] - 1) // threadsperblock[0],
-                    (self.num_clusters + threadsperblock[1] - 1) // threadsperblock[1],
-                    (max_len + threadsperblock[2] - 1) // threadsperblock[2],
-                )
-
-                chain_probs_kernel[blockspergrid, threadsperblock](
-                    la_d, lb_d, lens_d, out_d,
-                    self.num_chr, self.num_clusters, max_len
-                )
-
-                out = out_d.copy_to_host()
+                out = chain_probs_gpu(self.num_chr, self.num_clusters,
+                                      self.chain_lengths, self.log_alphas_V, self.log_betas_V)
 
                 # Unpack back into the expected list-of-arrays shape
                 for c in range(self.num_chr):
@@ -855,7 +1095,7 @@ class HMMModel:
 
             for k in range(self.num_clusters):
                 # Compute denominator
-                log_prob_joint = scipy.special.logsumexp(self.log_alphas_V[c][k][chain_length - 1])
+                log_prob_joint = logsumexp(self.log_alphas_V[c][k][chain_length - 1])
 
                 if np.isnan(log_prob_joint):
                     print('log_prob_joint is nan', self.log_alphas_V[c][k][chain_length - 1])
@@ -869,7 +1109,7 @@ class HMMModel:
                     row = np.exp(log_vec)
                     s = row.sum()
                     if s <= 0 or np.isnan(s) or np.isinf(s):
-                        probs_V[c][k][l] = np.array([1 / 3, 1 / 3, 1 / 3], dtype=np.float32)
+                        probs_V[c][k][l] = np.array([1/3, 1/3, 1/3], dtype=np.float32)
                     else:
                         probs_V[c][k][l] = (row / s).astype(np.float32)
 
@@ -911,23 +1151,22 @@ class HMMModel:
         denominators = np.zeros(self.num_states)
 
         # Add the prior contributions
-        for t in tqdm(range(self.num_states), desc='Thetas'):
-            numerators[t] += self.alphas[t] - 1
-            denominators[t] += self.alphas[t] + self.betas[t] - 2
+        numerators += self.alphas - 1
+        denominators += self.alphas + self.betas - 2
 
-            args = [[t, k, self.num_states, self.num_chr, self.num_cells,
-                     self.chain_lengths, self.z_probs, self.probs_V, self.A, self.D] for k in range(self.num_clusters)]
-            terms = list(tqdm(self.pool.imap(get_thetas, args),
-                              total=self.num_clusters, desc=f'Thetas for state {t}', disable=True))
+        # Allow threads to share memory and split up the computation by chromosome
+        with ThreadPoolExecutor(max_workers=self.num_threads) as executor:
+            futures = [executor.submit(get_theta_chr,self.z_probs,
+                                       self.A_sparse[c],self.D_sparse[c], self.probs_V[c]) for c in range(self.num_chr)]
 
-            for term in terms:
-                numerators += term[0]
-                denominators += term[1]
-
-            print(f'State {t} has numerator {numerators} denominator {denominators}')
+            for future in futures:
+                numerator, denominator = future.result()
+                numerators += numerator
+                denominators += denominator
 
         # Set thetas and make sure they are in (0, 1)
         self.thetas = np.array([np.clip(numerators[t] / denominators[t], 0.001, 0.999) for t in range(self.num_states)])
+        print(f'New thetas are {self.thetas}')
 
     def get_model_prob(self):
         """
@@ -943,60 +1182,118 @@ class HMMModel:
 
         return log_joint
 
-    def solve(self, tol, iters=25, num_inits=15, inner_iters=3):
+    def get_per_cluster_model_prob(self, k):
+        """
+        Approximates the log probability of the model using alphas
+        """
+        log_joint = 0
+
+        # Fast approximation
+        for c in range(self.num_chr):
+            cur_v_val = self.V[c][k][self.chain_lengths[c] - 1]
+            log_joint += self.log_alphas_V[c][k][self.chain_lengths[c] - 1][cur_v_val]
+
+        return log_joint
+
+    def identify_doublets(self, k=5, prior_doublet=0.5):
+        """
+        Runs the doublet detection method on the current model.
+        Fit the model before running doublet detection.
+
+        :param k: (int) The number of best candidates to consider for each cell.
+        :param prior_doublet: (float) The prior probability that a randomly chosen cell is a doublet.
+        :return p_doublet: A np.array of doublet probabilities for each cell.
+        """
+        # Check that k is small enough to reasonably compute
+        if k <= 1 or k > MAX_K:
+            raise ValueError(f'k must be 1< k <= {MAX_K}')
+
+        log_p_data_given_doublet = _get_data_prob_doublet(self.z_probs, self.positions_flat,
+                                                      self.A_values_flat, self.D_values_flat,
+                                                      self.cell_offsets_flat, self.V,
+                                                      self.thetas, self.lgamma_lookup, k)
+        log_p_data_given_singlet = _get_data_prob_singlet(self.Z, self.positions_flat,
+                                                      self.A_values_flat, self.D_values_flat,
+                                                      self.cell_offsets_flat, self.V,
+                                                      self.thetas,self.lgamma_lookup)
+
+        print(f'Prob doublet: {log_p_data_given_doublet}')
+        print(f'Prob singlet: {log_p_data_given_singlet}')
+
+        # Compute the doublet likelihood in log-space
+        log_prior_doublet = np.log(prior_doublet)
+        log_prior_singlet = np.log(1.0 - prior_doublet)
+
+        log_num = log_p_data_given_doublet + log_prior_doublet
+        log_den = np.logaddexp(log_num, log_p_data_given_singlet + log_prior_singlet)
+
+        p_doublet = np.exp(log_num - log_den)
+
+        print('Nan values in doublet detection', np.any(np.isnan(p_doublet)))
+
+        return p_doublet
+
+    def update(self):
+        # Update z
+        start_time = time.time()
+        self.get_z_probs()
+        self.set_z()
+        end_time = time.time()
+        print(f"Z update completed in {end_time - start_time:.4f} seconds (GPU: {self.use_gpu})")
+
+        # Update V
+        start_time = time.time()
+        self.forward_backward_pass()
+        self.get_chain_probabilities()
+        self.set_V()
+        end_time = time.time()
+        print(f"Forward-backward completed in {end_time - start_time:.4f} seconds (GPU: {self.use_gpu})")
+
+
+        if self.do_theta_update:
+            start_time = time.time()
+            self.update_theta()
+            end_time = time.time()
+            print(f"theta update completed in {end_time - start_time:.4f} seconds (GPU: {self.use_gpu})")
+
+        if self.do_pi_update:
+            start_time = time.time()
+            self.update_pi()
+            end_time = time.time()
+            print(f"pi update completed in {end_time - start_time:.4f} seconds (GPU: {self.use_gpu})")
+
+    def solve(self, tol, iters=25):
         """
         Performs EM iterations until convergence.
         Returns:
         """
         prev_prob = np.inf
-        self.init_pool()
 
-        # Try different initializations to get the best one
-        best_prob = -np.inf
-        best_Z = self.Z
-        best_chain = self.V
-
-        for _ in tqdm(range(num_inits), disable=True):
-            print(f'Initialization iteration {_}')
-
-            # If we already set Z, that is intentional, and we don't want to change it
-            if self.Z_init is None:
-                self.Z = np.random.choice(self.num_clusters,
-                                          size=self.num_cells,
-                                          replace=True,
-                                          p=self.kappas)
-            self.__init_chains__()
-            self.pi = self.pi_init
-
-            for i in range(inner_iters):
-                self.update()
-
-            new_model_prob = self.get_model_prob()
-            print(f'Initialization #{_} has probability {new_model_prob:.4f}')
-
-            if new_model_prob > best_prob:
-                best_Z = self.Z.copy()
-                best_chain = [v.copy() for v in self.V]
-                best_prob = new_model_prob
-
-        if num_inits > 0:
-            self.Z = best_Z.copy()
-            self.V = best_chain.copy()
+        # If we are warm starting from a cluster initialization
+        if self.z_init is not None:
+            self.forward_backward_pass()
+            self.get_chain_probabilities()
+            self.set_V()
 
         for i in range(iters):
             # Do EM iterations
             t0 = time.time()
             self.update()
-            model_prob = self.get_model_prob()
+            self.model_prob = self.get_model_prob()
             t1 = time.time()
             time_per_iteration = t1 - t0
 
-            print(f'log fit probability {model_prob}', f'Took {time_per_iteration} s')
-            if np.abs(model_prob - prev_prob) < tol:
+            print(f'log fit probability {self.model_prob}', f'Took {time_per_iteration} s')
+            if np.abs(self.model_prob - prev_prob) < tol:
                 print('Converged!')
                 break
 
-            prev_prob = model_prob
+            prev_prob = self.model_prob
 
-        self.model_prob = model_prob
-        self.close_pool()
+    def get_output(self):
+        per_cluster_joints = np.array([self.get_per_cluster_model_prob(i) for i in range(self.num_clusters)])
+
+        model_out = {'z_probs': self.z_probs, 'V': self.V, 'pi': self.pi,
+                     'theta': self.thetas, 'probability': self.model_prob,
+                     'cluster_joints': per_cluster_joints}
+        return model_out

@@ -1,5 +1,9 @@
 import numpy as np
 import multiprocessing as mp
+import anndata
+import pandas as pd
+from scipy.sparse import csr_matrix
+from scipy import sparse
 
 class Chromosome:
     def __init__(self, name, length, snp_locations, states, gene_to_snp_map, recombination_rate=None,
@@ -142,8 +146,6 @@ class Chromosome:
 
         return wild_type_arr, variant_arr
 
-
-
 class Organism:
     def __init__(self, chr_names, chromosomes, gender):
         """
@@ -251,16 +253,15 @@ _shared_male_inds = None
 _shared_female_inds = None
 _shared_males_cross_over = None
 
-def _init_breed_worker(organism_list, male_inds, female_inds, males_cross_over, backcross):
+def _init_breed_worker(organism_list, male_inds, female_inds, males_cross_over):
     """
     Initialize worker globals so we don't pickle large data for each task.
     """
-    global _shared_organism_list, _shared_male_inds, _shared_female_inds, _shared_males_cross_over, _backcross
+    global _shared_organism_list, _shared_male_inds, _shared_female_inds, _shared_males_cross_over
     _shared_organism_list = organism_list
     _shared_male_inds = male_inds
     _shared_female_inds = female_inds
     _shared_males_cross_over = males_cross_over
-    _backcross = backcross
 
 def _breed_worker(_):
     """
@@ -270,18 +271,8 @@ def _breed_worker(_):
     female_ind = np.random.choice(_shared_female_inds)
     male_ind = np.random.choice(_shared_male_inds)
 
-    if _backcross is None:
-        organism1 = _shared_organism_list[female_ind]
-        organism2 = _shared_organism_list[male_ind]
-    else:
-        backcross_gender = _backcross.gender
-
-        if backcross_gender == 'M':
-            organism1 = _shared_organism_list[female_ind]
-            organism2 = _backcross
-        else:
-            organism1 = _backcross
-            organism2 = _shared_organism_list[male_ind]
+    organism1 = _shared_organism_list[female_ind]
+    organism2 = _shared_organism_list[male_ind]
 
     return organism1.breed(organism2, males_cross_over=_shared_males_cross_over)
 
@@ -308,11 +299,17 @@ def _init_sample_worker(mean_var_UMI, UMI_variance, num_cells, adata_X, adata_ge
     _shared_adata_genes = adata_genes
     _shared_adata_chromosomes = adata_chromosomes
 
-def _sample_worker(organism):
+def _sample_worker(organism_index, organism):
     """
-    Worker function that reconstructs a minimal adata-like object from globals.
+    Worker function for parallelizable sampling from organisms.
+
+    :param organism_index: The index of the organism (for record keeping later).
+    :param organism: The organism object.
+    :return: organism_index, wt_reads, var_reads
     """
     np.random.seed()
+
+    # To reduce memory usage use a minimal fake adata
     class MiniAdata:
         pass
     adata = MiniAdata()
@@ -321,11 +318,16 @@ def _sample_worker(organism):
         'genes': _shared_adata_genes,
         'chromosome': _shared_adata_chromosomes
     }
-    return organism.sample_cells(_shared_mean_var_UMI, _shared_UMI_variance, _shared_num_cells, adata)
+
+    # Sample from the given organism
+    wt_reads, var_reads = organism.sample_cells(_shared_mean_var_UMI, _shared_UMI_variance,
+                                                _shared_num_cells, adata)
+
+    return organism_index, wt_reads, var_reads
 
 
 class BreedingPool:
-    def __init__(self, organism_list, males_cross_over=True):
+    def __init__(self, organism_list, males_cross_over=True, pool=None):
         """
         A pool of organisms that can breed with each other.
 
@@ -336,8 +338,7 @@ class BreedingPool:
         self.organism_list = organism_list
         self.males_cross_over = males_cross_over
 
-
-    def breed_generation(self, num_offspring, n_processes=None, backcross=None):
+    def breed_generation(self, num_offspring, n_processes=None):
         """
         Uses multiprocessing to make a new breeding pool with the specified number of offspring.
         """
@@ -351,54 +352,159 @@ class BreedingPool:
         with mp.Pool(
             processes=n_processes,
             initializer=_init_breed_worker,
-            initargs=(self.organism_list, male_inds, female_inds, self.males_cross_over, backcross)
+            initargs=(self.organism_list, male_inds, female_inds, self.males_cross_over)
         ) as pool:
             new_organism_list = list(pool.map(_breed_worker, range(num_offspring)))
 
         return BreedingPool(new_organism_list, self.males_cross_over)
 
-    def sample_cells(self, mean_var_UMI, UMI_variance, num_cells, adata, n_processes=None):
+    def sample_cells(self, mean_var_UMI, UMI_variance,
+                     num_cells, adata, doublet_rate=0, n_processes=None):
         """
-        Multiprocessed sample_cells with adata variables stored in worker globals.
+        Samples cells from the pool of organisms with a specified doublet rate.
+
+        :param mean_var_UMI: The mean number of read UMI's to sample (from a normal distribution).
+        :param UMI_variance: The variance for read UMI's (sampled from a normal distribution).
+        :param num_cells: The number of cells per organism to sample.
+        :param adata: A starting (real) scRNA-seq dataset to sample reads from.
+        :param doublet_rate: The doublet rate to use.
+        :param n_processes: The number of threads to use.
+        :return: (list of np.array of shapes (num_cells * len(self.organism_list), num_variants_chr))
         """
         if n_processes is None:
             n_processes = mp.cpu_count()
 
-        num_chromosomes = len(self.organism_list[0].chr_names)
+        # Determine how many cells we actually need to sample when doublets are factored in
+        num_doublets = int(round(doublet_rate * num_cells))
+        num_singlets = num_cells - num_doublets
+        required_cells = num_singlets + 2 * num_doublets
 
-        with mp.Pool(
-                processes=n_processes,
-                initializer=_init_sample_worker,
-                initargs=(
-                        mean_var_UMI,
-                        UMI_variance,
-                        num_cells,
-                        adata.X,
-                        adata.var['genes'].to_numpy(),
-                        adata.var['chromosome'].to_numpy()
-                )
+        with mp.Pool(processes=n_processes,
+                     initializer=_init_sample_worker,
+                     initargs=(mean_var_UMI, UMI_variance, required_cells,
+                               adata.X, adata.var['genes'].to_numpy(), adata.var['chromosome'].to_numpy())
         ) as pool:
-            results = pool.map(_sample_worker, self.organism_list)
+            results = pool.starmap(_sample_worker, [(i, organism) for i, organism in enumerate(self.organism_list)])
 
-        # Initialize final matrices
-        samples_mat_wt = []
-        samples_mat_var = []
-        for j in range(num_chromosomes):
-            chr_name = self.organism_list[0].chr_names[j]
-            num_variants_chr = len(self.organism_list[0].chromosomes[chr_name].snp_locations)
-            wt_mat = np.zeros((num_cells * len(self.organism_list), num_variants_chr))
-            var_mat = np.zeros_like(wt_mat)
-            samples_mat_wt.append(wt_mat)
-            samples_mat_var.append(var_mat)
+        adata = self._results_to_anndata(results)
 
-        # Fill in data
-        for i, (org_wt, org_var) in enumerate(results):
-            for j in range(num_chromosomes):
-                samples_mat_wt[j][num_cells * i:num_cells * (i + 1)] = org_wt[j]
-                samples_mat_var[j][num_cells * i:num_cells * (i + 1)] = org_var[j]
+        # Combine cells to create doublets
+        if doublet_rate > 0:
+            adata = self._add_doublets(adata, num_doublets)
 
-        return samples_mat_wt, samples_mat_var
+        return adata, self.organism_list
 
+    def _add_doublets(self, adata, num_doublets):
+        """
+        Randomly combines cells into synthetic doublets.
+
+        :param adata: Input anndata of cells x variants.
+        :param num_doublets: Number of doublets per organism.
+        :return: AnnData with doublets.
+        """
+        if num_doublets == 0:
+            return adata
+
+        total_doublets = num_doublets * len(self.organism_list) # The final number of doublets we'll have
+        num_doublet_precursor = 2 * total_doublets # The number of precursor cells we need to combine to make them
+
+        # Extract current layers
+        X = adata.X.tocsr()
+        depth = adata.layers["depth"].tocsr()
+
+        # Randomly permute all cells so we can select singlets and doublets
+        perm = np.random.permutation(adata.n_obs)
+        doublet_cells = perm[:num_doublet_precursor]
+        singlet_cells = np.sort(perm[num_doublet_precursor:])
+
+        # Start creating new alt and depth, as well as obs for the anndata
+        X_blocks = [X[singlet_cells]]
+        depth_blocks = [depth[singlet_cells]]
+        obs = adata.obs.iloc[singlet_cells].copy()
+
+        for i in range(total_doublets):
+            # Grab pairs of cells
+            idx1 = doublet_cells[2 * i]
+            idx2 = doublet_cells[2 * i + 1]
+
+            # Combine their alt and depth values
+            X_blocks.append(X[idx1] + X[idx2])
+            depth_blocks.append(depth[idx1] + depth[idx2])
+
+            # Set their identity and doublet status
+            obs.loc[len(obs)] = {
+                "identity": int(adata.obs.iloc[idx1]["identity"]),
+                "identity_2": int(adata.obs.iloc[idx2]["identity"]),
+                "is_doublet": True,
+            }
+
+        # Make a new matrix with our doublets added
+        adata_out = anndata.AnnData(
+            X=sparse.vstack(X_blocks, format="csr"),
+            obs=obs.reset_index(drop=True),
+            var=adata.var.copy(),
+        )
+        adata_out.layers["depth"] = sparse.vstack(depth_blocks, format="csr")
+
+        return adata_out
+
+    def _results_to_anndata(self, results):
+        """
+        Converts multiprocessing results into an anndata of cells.
+
+        :param results: (list of tuples) (organism, wt_counts, variant_counts)
+        :return: anndata with
+                 X: variant counts
+                 layers['depth']: depth counts.
+                 var['chromosome']: The chromosome the variant is located on.
+                 var['position']: The genomic position of the variant.
+                 obs['identity']: The ground truth individual's index.
+                 obs['identity_2']: If the cell is a doublet, the identity of the second individual of origin.
+                 obs['is_doublet']: Whether the cell is a doublet.
+        """
+        chr_names = self.organism_list[0].chr_names
+
+        alt_blocks = []
+        depth_blocks = []
+
+        obs_rows = []
+        var_rows = []
+
+        for chr_name in chr_names:
+            # The var df will have the chromosome and snp location for each entry
+            chromosome = self.organism_list[0].chromosomes[chr_name]
+            positions = chromosome.snp_locations
+
+            for pos in positions:
+                var_rows.append({"chromosome": chr_name,
+                                 "position": pos})
+
+        # Construct the var dataframe
+        var = pd.DataFrame(var_rows)
+
+        # The obs dataframe needs to store the identity of each cell (and doublet identity)
+        for organism_index, wt_list, var_list in results:
+            alt = np.hstack(var_list)
+            wt = np.hstack(wt_list)
+
+            alt_blocks.append(alt)
+            depth_blocks.append(alt + wt)
+
+            # For each cell in the organism, make an entry
+            n = alt.shape[0]
+            obs_rows.extend([{"identity": organism_index, "identity_2": -1, "is_doublet": False} for _ in range(n)])
+
+        # Create obs and then the data matrices
+        obs = pd.DataFrame(obs_rows).astype({"identity": np.int32,
+                                             "identity_2": np.int32,
+                                             "is_doublet": bool})
+        X = np.vstack(alt_blocks)
+        depth = np.vstack(depth_blocks)
+
+        adata = anndata.AnnData(X=csr_matrix(X), obs=obs, var=var)
+        adata.layers["depth"] = csr_matrix(depth)
+
+        return adata
 
 class BreedingExperiment:
     def __init__(self, starting_organism_list, offspring_per_generation, males_cross_over=True):
@@ -415,22 +521,17 @@ class BreedingExperiment:
 
         self.starting_pool = BreedingPool(starting_organism_list, males_cross_over)
 
-    def run_experiment(self, num_generations, n_proc=None, backcross=None):
+    def run_experiment(self, num_generations, n_proc=None):
         """
-        Runs a breeding experiment to create num_generations of organisms.
-        Args:
-            num_generations: The number of generations to run. 0-indexed.
-            backcross: If we want to breed with only a specific organism for each generation
+        Runs a breeding experiment for n generations.
 
-        Returns: list of BreedingPools indexed by generation
+        :param num_generations: The number of generations to run.
+        :param n_proc: The number of processes to use.
+        :return: current_generation: The final generation of the breeding experiment.
         """
-
         current_generation = self.starting_pool
 
         for i in range(1, num_generations + 1):
-            current_generation = current_generation.breed_generation(self.offspring_per_generation,
-                                                                n_processes=n_proc, backcross=backcross)
+            current_generation = current_generation.breed_generation(self.offspring_per_generation, n_processes=n_proc)
 
         return current_generation
-
-

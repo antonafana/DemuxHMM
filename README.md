@@ -29,33 +29,30 @@ combination on chromosome `i`. Cells should already be quality controlled and cl
 We suggest [CellSNP-lite](https://github.com/single-cell-genetics/cellsnp-lite) or similar for variant calling.
 The method also requires an upper bound on the number of individuals, and an estimate on the number of 
 state changes per chromosome (ex. homozygous reference -> heterozygous). We suggest repeating inference multiple times
-and using the run with the best model probability, like the below example:
+and using the run with the best model probability. We give an example for a single initialization:
 
 ```python
-import numpy as np
 from demuxHMM import HMMModel
+from demuxHMM.demuxHMM_utils import adata_to_HMM
+import anndata
 
 num_repeats = 30
 tolerance = 1
 num_individuals = 100 
 mean_transitions = 10
-best_model_score = -np.inf
-best_model = None
 
-for _ in range(num_repeats):
-    model = HMMModel(A, D, num_individuals, mean_transitions)
-    model.solve(tolerance, num_inits=0)
-    model_out = model.get_output()
+# Cells x variants adata. X is variant calls, layers['depth'] is depth
+adata = anndata.read_h5ad('variant_calls.h5ad')
+A, D = adata_to_HMM(adata, adata.var['chromosome'].unique())
 
-    if model_out['probability'] > best_model_score:
-        best_model_score = model_out['probability']
-        best_model = model_out
+model = HMMModel(A, D, num_individuals, mean_transitions)
+model.solve(tolerance)
+best_model = model.get_output()
 ```
 
 For more complex examples and practical applications, please see the "paper" directory.
 
 ## Requirements and Future Changes
-Currently, the model's GPU mode requires a CUDA capable GPU with 9GB+ of VRAM. It is a high priority for us to release
-a VRAM-scalable version. The model can be run on CPU, but is slower. We also plan to release several quality-of-life 
+Currently, the model's GPU mode requires a CUDA capable GPU with multiple GB of VRAM (scaling depending on number of cells and SNPs). The model can be run on CPU, but is much slower. We also plan to release several quality-of-life 
 improvements to the API to simplify usage. If you have any suggestions, or notice any problems, please open an issue.
 

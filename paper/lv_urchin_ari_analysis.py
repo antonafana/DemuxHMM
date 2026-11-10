@@ -265,4 +265,5 @@ plt.legend(handles=custom_legend, loc='upper left', fontsize=14)
 
 # Save figure
 plt.savefig('figures/urchin_emd_errors.pdf', transparent=True)
+plt.savefig('journal_figures/Fig6.tif', dpi=600, format="tiff", pil_kwargs={"compression": "tiff_lzw"})
 plt.show()
