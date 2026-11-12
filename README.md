@@ -53,6 +53,4 @@ best_model = model.get_output()
 For more complex examples and practical applications, please see the "paper" directory.
 
 ## Requirements and Future Changes
-Currently, the model's GPU mode requires a CUDA capable GPU with multiple GB of VRAM (scaling depending on number of cells and SNPs). The model can be run on CPU, but is much slower. We also plan to release several quality-of-life 
-improvements to the API to simplify usage. If you have any suggestions, or notice any problems, please open an issue.
-
+Currently, the model's GPU mode requires a CUDA capable GPU with multiple GB of VRAM (scaling depending on number of cells and SNPs). If you have suggestions for quality of life improvements please open an issue.

@@ -3,3 +3,5 @@
 *.egg-info
 wsl_env
 build
+dist
+__pycache__
